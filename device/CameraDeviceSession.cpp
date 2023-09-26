@@ -406,6 +406,7 @@ ScopedAStatus CameraDeviceSession::configureStreams(
 
             mStreamMap[id] = *stream;
             mStreamMap[id].mId = id;
+            mCirculatingBuffers.emplace(stream->mId, CirculatingBuffers{});
         } else {
             if (mStreamMap[id].stream_type !=
                     (int) cfg.streams[i].streamType ||
@@ -431,6 +432,25 @@ ScopedAStatus CameraDeviceSession::configureStreams(
           cfg.streams.size(), static_cast<uint32_t>(cfg.operationMode),
           cfg.sessionParams.metadata.size(), cfg.streamConfigCounter,
           (cfg.multiResolutionInputImage ? "true" : "false"));
+
+    if (mFreeBufEarly)
+    {
+        // Remove buffers of deleted streams
+        for(auto it = mStreamMap.begin(); it != mStreamMap.end(); it++) {
+            int id = it->first;
+            bool found = false;
+            for (const auto& stream : cfg.streams) {
+                if (id == stream.id) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                // Unmap all buffers of deleted stream
+                cleanupBuffersLocked(id);
+            }
+        }
+    }
 
     for (const auto& s : cfg.streams) {
         const uint32_t dataspaceBits = static_cast<uint32_t>(s.dataSpace);
@@ -474,6 +494,31 @@ ScopedAStatus CameraDeviceSession::configureStreams(
     ATRACE_BEGIN("camera3->configure_streams");
     status_t ret = mDevice->ops->configure_streams(mDevice, &stream_list);
     ATRACE_END();
+
+    // delete unused streams, note we do this after adding new streams to ensure new stream
+    // will not have the same address as deleted stream, and HAL has a chance to reference
+    // the to be deleted stream in configure_streams call
+    for(auto it = mStreamMap.begin(); it != mStreamMap.end();) {
+        int id = it->first;
+        bool found = false;
+        for (const auto& stream : cfg.streams) {
+            if (id == stream.id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Unmap all buffers of deleted stream
+            // in case the configuration call succeeds and HAL
+            // is able to release the corresponding resources too.
+            if (!mFreeBufEarly) {
+                cleanupBuffersLocked(id);
+            }
+            it = mStreamMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     for (uint32_t i = 0; i < stream_list.num_streams; i++) {
         camera3_stream_t* stream = streams[i];
@@ -746,6 +791,16 @@ void CameraDeviceSession::closeImpl() {
     mDevice->common.close(&mDevice->common);
     ATRACE_END();
     mHwCamera.close();
+     // free all imported buffers
+    Mutex::Autolock _l(mInflightLock);
+    for(auto& pair : mCirculatingBuffers) {
+        CirculatingBuffers& buffers = pair.second;
+        for (auto& p2 : buffers) {
+            sHandleImporter.freeBuffer(p2.second);
+        }
+        buffers.clear();
+    }
+    mCirculatingBuffers.clear();
 }
 
 void CameraDeviceSession::flushImpl(const std::chrono::steady_clock::time_point start) {
@@ -1368,14 +1423,18 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
         if (hasInputBuf) {
             int streamId = static_cast<Camera3Stream*>(hal_result->input_buffer->stream)->mId;
             auto key = std::make_pair(streamId, frameNumber);
-            mInflightBuffers.erase(key);
+            if (mInflightBuffers.count(key)) {
+                mInflightBuffers.erase(key);
+            }
         }
 
         for (size_t i = 0; i < numOutputBufs; i++) {
             int streamId = static_cast<Camera3Stream*>(hal_result->output_buffers[i].stream)->mId;
             auto key = std::make_pair(streamId, frameNumber);
-            mInflightBuffers.erase(key);
-            ALOGD("%s frameNumber:%d numBufs:%d streamId:%d",__FUNCTION__,frameNumber,numBufs,streamId);
+            if (mInflightBuffers.count(key)) {
+                mInflightBuffers.erase(key);
+                ALOGD("%s frameNumber:%d numBufs:%d streamId:%d",__FUNCTION__,frameNumber,numBufs,streamId);
+            }
         }
 
         if (mInflightBuffers.empty()) {
@@ -1433,7 +1492,7 @@ void CameraDeviceSession::processCaptureResult(
                     std::move(metadata), std::move(outputBuffers)));
         }
     // }
-
+    Mutex::Autolock _lc(mInflightLock);
     for (size_t i = 0; i < hal_result->num_output_buffers; i++) {
         if (hal_result->output_buffers[i].release_fence != -1) {
             native_handle_t* handle = native_handle_create(/*numFds*/1, /*numInts*/0);
