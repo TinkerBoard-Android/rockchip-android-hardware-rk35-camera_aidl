@@ -228,7 +228,7 @@ bool listRkCameras(const std::function<void(HwCameraFactory)>& cameraSink) {
         char cameraId[kMaxCameraIdLen];
         snprintf(cameraId, sizeof(cameraId), "%d", i);
         std::string cameraIdStr(cameraId);
-        cameraSink([module = std::move(module),cameraIdStr]() {
+        cameraSink([module = module,cameraIdStr]() {
             return std::make_unique<RkCamera>(module,cameraIdStr);
         });
     }
