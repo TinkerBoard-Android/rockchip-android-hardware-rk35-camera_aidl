@@ -520,11 +520,6 @@ ScopedAStatus CameraDeviceSession::configureStreams(
         }
     }
 
-    for (uint32_t i = 0; i < stream_list.num_streams; i++) {
-        camera3_stream_t* stream = streams[i];
-        ALOGD("stream:%d %dx%d priv:%p",i,stream->width,stream->height,stream->priv);
-    }
-
     const size_t nStreams = cfg.streams.size();
     LOG_ALWAYS_FATAL_IF(halStreams.size() != nStreams);
     // if(cfg.sessionParams.metadata.size() ==0 ){
@@ -534,6 +529,12 @@ ScopedAStatus CameraDeviceSession::configureStreams(
     if (mHwCamera.configure(cfg.sessionParams, nStreams,
                             cfg.streams.data(), halStreams.data())) {
         mStreamBufferCache.clearStreamInfo();
+        for (uint32_t i = 0; i < stream_list.num_streams; i++) {
+            camera3_stream_t* stream = streams[i];
+            halStreams[i].producerUsage =  static_cast<BufferUsage>(stream->usage);
+            ALOGD("stream:%d %dx%d priv:%p",i,stream->width,stream->height,stream->priv);
+        }
+
         *halStreamsOut = std::move(halStreams);
         mFirstRequest = true;
         return ScopedAStatus::ok();
