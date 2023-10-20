@@ -36,7 +36,7 @@ StreamBufferCache::update(const StreamBuffer& sb) {
     //  );
     const auto bi = mCache.find(sb.bufferId);
     if (bi == mCache.end()) {
-        ALOGD("%s insert bufferId:%d",__FUNCTION__,sb.bufferId);
+        //ALOGD("%s insert bufferId:%d",__FUNCTION__,sb.bufferId);
         const auto r = mCache.insert({sb.bufferId, CachedStreamBuffer(sb)});
         LOG_ALWAYS_FATAL_IF(!r.second);
         r.first->second.dump();

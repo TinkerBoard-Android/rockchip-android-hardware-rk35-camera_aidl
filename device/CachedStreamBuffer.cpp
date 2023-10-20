@@ -106,10 +106,10 @@ CachedStreamBuffer::CachedStreamBuffer(const StreamBuffer& sb)
         :mBufferId(sb.bufferId)
         //, mAcquireFence(importAidlNativeHandleFence(sb.acquireFence))
         , mStreamId(sb.streamId) {
-    ALOGD("%s sb.acquireFence:%d ,mAcquireFence:%d",__FUNCTION__,
-    sb.acquireFence.fds.size()> 0 ?
-    sb.acquireFence.fds[0].get():-1,
-    mAcquireFence);
+    // ALOGD("%s sb.acquireFence:%d ,mAcquireFence:%d",__FUNCTION__,
+    // sb.acquireFence.fds.size()> 0 ?
+    // sb.acquireFence.fds[0].get():-1,
+    // mAcquireFence);
     //LOG_ALWAYS_FATAL_IF(!mBuffer);
     LOG_ALWAYS_FATAL_IF(!mBufferId);
     LOG_ALWAYS_FATAL_IF(mStreamId < 0);
@@ -128,7 +128,7 @@ CachedStreamBuffer::CachedStreamBuffer(CachedStreamBuffer&& rhs) noexcept
 
 CachedStreamBuffer::~CachedStreamBuffer() {
     LOG_ALWAYS_FATAL_IF(!mProcessed);
-    ALOGD("%s mStreamId:%d,mBufferId:%d,mAcquireFence:%d",__FUNCTION__,mStreamId,mBufferId,mAcquireFence);
+    //ALOGD("%s mStreamId:%d,mBufferId:%d,mAcquireFence:%d",__FUNCTION__,mStreamId,mBufferId,mAcquireFence);
     if (mStreamId >= 0) {
         //LOG_ALWAYS_FATAL_IF(!mBuffer);
         //LOG_ALWAYS_FATAL_IF(GraphicBufferMapper::get().freeBuffer(mBuffer) != NO_ERROR);

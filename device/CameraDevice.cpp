@@ -97,7 +97,7 @@ using aidl::android::hardware::camera::common::Status;
 using hw::HwCameraFactoryProduct;
 
 CameraDevice::CameraDevice(HwCameraFactoryProduct hwCamera,std::string cameraId)
-        : mHwCamera(std::move(hwCamera)),mCameraId(cameraId) {
+        : mCameraId(cameraId),mHwCamera(std::move(hwCamera)) {
 
     mCameraIdInt = atoi(mCameraId.c_str());
     // Should not reach here as provider also validate ID

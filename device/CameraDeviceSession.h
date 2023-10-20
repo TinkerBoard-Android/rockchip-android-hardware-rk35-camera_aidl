@@ -299,6 +299,11 @@ private:
     void overrideResultForPrecaptureCancelLocked(
             const AETriggerCancelOverride &aeTriggerCancelOverride,
             ::android::hardware::camera::common::V1_0::helper::CameraMetadata *settings /*out*/);
+
+    int64_t mSensorExposureTimeNs;
+    int64_t getSensorExposureTime(){
+        return mSensorExposureTimeNs;
+    }
 };
 
 }  // namespace implementation

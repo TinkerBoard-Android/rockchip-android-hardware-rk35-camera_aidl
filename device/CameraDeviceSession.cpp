@@ -72,6 +72,7 @@ namespace {
 constexpr char kClass[] = "CameraDeviceSession";
 
 constexpr int64_t kOneSecondNs = 1000000000;
+constexpr int64_t kDefaultSensorExposureTimeNs = kOneSecondNs / 100;
 constexpr size_t kMsgQueueSize = 256 * 1024;
 
 // Size of request metadata fast message queue. Change to 0 to always use hwbinder buffer.
@@ -140,7 +141,7 @@ void notifyShutter(ICameraDeviceCallback* cb,
     using aidl::android::hardware::camera::device::NotifyMsg;
     using aidl::android::hardware::camera::device::ShutterMsg;
     using NotifyMsgTag = NotifyMsg::Tag;
-    ALOGD("%s frameNumber:%d timestamp=%" PRId64" ",__FUNCTION__,frameNumber,(long)timestamp);
+    //ALOGD("%s frameNumber:%d timestamp=%" PRId64" ",__FUNCTION__,frameNumber,(long)timestamp);
     NotifyMsg msg;
 
     {
@@ -215,37 +216,6 @@ void convertFromAidl(const Stream &src, Camera3Stream* dst) {
     return;
 }
 
-
-void convertToHidl(const Camera3Stream* src, HalStream* dst) {
-    dst->id = src->mId;
-    dst->overrideFormat = (PixelFormat) src->format;
-    dst->maxBuffers = src->max_buffers;
-    if (src->stream_type == CAMERA3_STREAM_OUTPUT) {
-        dst->consumerUsage = static_cast<BufferUsage>(0);
-        dst->producerUsage = static_cast<BufferUsage>(src->usage);
-    } else if (src->stream_type == CAMERA3_STREAM_INPUT) {
-        dst->producerUsage = static_cast<BufferUsage>(0);
-        dst->consumerUsage = static_cast<BufferUsage>(src->usage);
-    } else {
-        //Should not reach here per current HIDL spec, but we might end up adding
-        // bi-directional stream to HIDL.
-        ALOGW("%s: Stream type %d is not currently supported!",
-                __FUNCTION__, src->stream_type);
-    }
-}
-
-void convertFromHidl(
-        buffer_handle_t* bufPtr, BufferStatus status, camera3_stream_t* stream, int acquireFence,
-        camera3_stream_buffer_t* dst) {
-    dst->stream = stream;
-    dst->buffer = bufPtr;
-    dst->status = (int) status;
-    dst->acquire_fence = acquireFence;
-    dst->release_fence = -1; // meant for HAL to fill in
-}
-
-
-
 }  // namespace
 
 HandleImporter CameraDeviceSession::sHandleImporter;
@@ -266,6 +236,7 @@ CameraDeviceSession::CameraDeviceSession(
          , mResultQueue(kMsgQueueSize, false)
          , mIsAELockAvailable(false)
          , mNumPartialResults(1)
+         , mSensorExposureTimeNs(kDefaultSensorExposureTimeNs)
           {
     LOG_ALWAYS_FATAL_IF(!mRequestQueue.isValid());
     LOG_ALWAYS_FATAL_IF(!mResultQueue.isValid());
@@ -811,7 +782,6 @@ void CameraDeviceSession::flushImpl(const std::chrono::steady_clock::time_point 
 }
 
 int CameraDeviceSession::waitFlushingDone(const std::chrono::steady_clock::time_point start) {
-    ALOGE("%s",__FUNCTION__);
     std::unique_lock<std::mutex> lock(mNumBuffersInFlightMtx);
     if (mNumBuffersInFlight == 0) {
         return 0;
@@ -833,7 +803,6 @@ int CameraDeviceSession::waitFlushingDone(const std::chrono::steady_clock::time_
                   kClass, __func__, __LINE__, waitedForMs, kRecommendedDeadlineMs,
                   kFatalDeadlineMs);
         }
-        ALOGE("%s  mNumBuffersInFlight:%d done.",__FUNCTION__,mNumBuffersInFlight);
         return waitedForMs;
     } else {
         LOG_ALWAYS_FATAL("%s:%s:%d: %zu buffers are still in "
@@ -955,7 +924,7 @@ Status CameraDeviceSession::processOneCaptureRequest(const CaptureRequest& reque
     for (size_t i = 0; i < outputBuffersSize; ++i) {
         if (request.outputBuffers[i].bufferId <= 0)
         {
-            ALOGE("%s invalid output buffer bufferId:%d",__FUNCTION__,request.outputBuffers[i].bufferId);
+            ALOGE("%s invalid output buffer bufferId:%d",__FUNCTION__,(int)request.outputBuffers[i].bufferId);
             return FAILURE(Status::ILLEGAL_ARGUMENT);
         }
     }
@@ -1287,7 +1256,6 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
     bool hasInputBuf = (hal_result->input_buffer != nullptr);
     size_t numOutputBufs = hal_result->num_output_buffers;
     size_t numBufs = numOutputBufs + (hasInputBuf ? 1 : 0);
-    ALOGD("%s frameNumber:%d numBufs:%d",__FUNCTION__,frameNumber,numBufs);
     if (numBufs > 0) {
         Mutex::Autolock _l(mInflightLock);
         if (hasInputBuf) {
@@ -1434,7 +1402,6 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
             auto key = std::make_pair(streamId, frameNumber);
             if (mInflightBuffers.count(key)) {
                 mInflightBuffers.erase(key);
-                ALOGD("%s frameNumber:%d numBufs:%d streamId:%d",__FUNCTION__,frameNumber,numBufs,streamId);
             }
         }
 
@@ -1447,52 +1414,57 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
 void CameraDeviceSession::processCaptureResult(
         const camera3_callback_ops *cb,
         const camera3_capture_result *hal_result){
-
+    CameraMetadata metadata;
+    ::android::hardware::camera::common::V1_0::helper::CameraMetadata settingsTmp;
+    camera_metadata_t* partialMetadata =
+                reinterpret_cast<camera_metadata_t*>((void*)hal_result->result);
     int streamId = hal_result->num_output_buffers> 0
     ? static_cast<Camera3Stream*>(hal_result->output_buffers[0].stream)->mId : -1;
     int format = streamId >= 0 ?mStreamMap[streamId].format: -1;
-    // ALOGD("%s, mFlushing:%d frameNumber:%d,num_output_buffers:%d,streamId:%d,format:%d,partial_result:%d ",__FUNCTION__,(int)mFlushing,
-    // hal_result->frame_number,
-    // hal_result->num_output_buffers,
-    // streamId,
-    // format,
-    // hal_result->partial_result);
 
-    CameraMetadata metadata;
     if(hal_result->result!=nullptr){
-        metadata = metadataCompactRaw(hal_result->result);
+        camera_metadata_ro_entry exposureTimeResult;
+        exposureTimeResult.tag = ANDROID_SENSOR_EXPOSURE_TIME;
+        find_camera_metadata_ro_entry(hal_result->result, ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeResult);
+        if (exposureTimeResult.count) {
+            mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
+        }
+        if(hal_result->frame_number == 1){
+            settingsTmp = partialMetadata;
+            mSensorExposureTimeNs = kDefaultSensorExposureTimeNs;
+            settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &mSensorExposureTimeNs, 1);
+            partialMetadata = const_cast<camera_metadata_t*>(settingsTmp.getAndLock());
+            metadata = metadataCompactRaw(partialMetadata);
+            settingsTmp.unlock(partialMetadata);
+        }else{
+            metadata = metadataCompactRaw(hal_result->result);
+        }
     }
 
     Mutex::Autolock _l(mInflightRequestLock);
     HwCaptureRequest& req = mInflightRequest[hal_result->frame_number];
 
-    // if (mFlushing) {
-    //     disposeCaptureRequest(std::move(req));
-    // }else{
-        // ALOGD("%s req.frameNumber:%d req.buffers:%d, hal_result->frame_number:%d hal_result->num_output_buffers:%d",__FUNCTION__,req.frameNumber,req.buffers.size()
-        // ,hal_result->frame_number,hal_result->num_output_buffers);
-
-        std::vector<StreamBuffer> outputBuffers = mHwCamera.getOutputStreamBuffer(req,streamId);
-        req.doneBufferNumber+= outputBuffers.size();
-        // ALOGD("%s outputBuffers:%d ,hal_result->num_output_buffers:%d req.doneBufferNumber:%d",__FUNCTION__,outputBuffers.size(),hal_result->num_output_buffers,req.doneBufferNumber);
-        if (format == 33)
-        {
-            for (size_t i = 0; i < hal_result->num_output_buffers; i++) {
-                if (hal_result->output_buffers[i].release_fence != -1) {
-                    if(format == 33){
-                        ALOGD("streamId:%d sync_wait jpeg fd:%d frame_number:%d",streamId,hal_result->output_buffers[i].release_fence,hal_result->frame_number);
-                        sync_wait(hal_result->output_buffers[i].release_fence, -1);
-                        ALOGD("sync_wait done fd:%d frame_number:%d",hal_result->output_buffers[i].release_fence,hal_result->frame_number);
-                    }
+    std::vector<StreamBuffer> outputBuffers = mHwCamera.getOutputStreamBuffer(req,streamId);
+    req.doneBufferNumber+= outputBuffers.size();
+    // ALOGD("%s outputBuffers:%d ,hal_result->num_output_buffers:%d req.doneBufferNumber:%d",__FUNCTION__,outputBuffers.size(),hal_result->num_output_buffers,req.doneBufferNumber);
+    if (format == 33)
+    {
+        for (size_t i = 0; i < hal_result->num_output_buffers; i++) {
+            if (hal_result->output_buffers[i].release_fence != -1) {
+                if(format == 33){
+                    ALOGD("streamId:%d sync_wait jpeg fd:%d frame_number:%d",streamId,hal_result->output_buffers[i].release_fence,hal_result->frame_number);
+                    sync_wait(hal_result->output_buffers[i].release_fence, -1);
+                    ALOGD("sync_wait done fd:%d frame_number:%d",hal_result->output_buffers[i].release_fence,hal_result->frame_number);
                 }
             }
-            consumeCaptureResult(makeCaptureResult(hal_result->frame_number,
-                    std::move(metadata), std::move(outputBuffers)));
-        }else{
-            consumeCaptureResult(makeCaptureResult(hal_result->frame_number,
-                    std::move(metadata), std::move(outputBuffers)));
         }
-    // }
+        consumeCaptureResult(makeCaptureResult(hal_result->frame_number,
+                std::move(metadata), std::move(outputBuffers)));
+    }else{
+        consumeCaptureResult(makeCaptureResult(hal_result->frame_number,
+                std::move(metadata), std::move(outputBuffers)));
+    }
+
     Mutex::Autolock _lc(mInflightLock);
     for (size_t i = 0; i < hal_result->num_output_buffers; i++) {
         if (hal_result->output_buffers[i].release_fence != -1) {
@@ -1503,12 +1475,7 @@ void CameraDeviceSession::processCaptureResult(
             native_handle_close(handle);
             native_handle_delete(handle);
         }
-        // if (hal_result->output_buffers[i].acquire_fence != -1) {
-        //     native_handle_t* handle = native_handle_create(/*numFds*/1, /*numInts*/0);
-        //     handle->data[0] = hal_result->output_buffers[i].acquire_fence;
-        //     ALOGD("%s format:%d acquire_fence:%d frame_number:%d",
-        //     __FUNCTION__,format,handle->data[0],hal_result->frame_number);
-        // }
+
         auto key = std::make_pair(streamId, hal_result->frame_number);
         if (mInflightBuffers.count(key)) {
             mInflightBuffers.erase(key);
@@ -1738,6 +1705,10 @@ void CameraDeviceSession::cleanupInflightFences(
 
 // Needs to get called after acquiring 'mInflightLock'
 void CameraDeviceSession::cleanupBuffersLocked(int id) {
+    auto cbsIt = mCirculatingBuffers.find(id);
+    if (cbsIt == mCirculatingBuffers.end()) {
+        return;
+    }
     for (auto& pair : mCirculatingBuffers.at(id)) {
         sHandleImporter.freeBuffer(pair.second);
     }
@@ -1848,7 +1819,6 @@ bool CameraDeviceSession::handleAePrecaptureCancelRequestLocked(
 }
 
 void CameraDeviceSession::notify(NotifyMsg msg){
-    using ErrorCode = aidl::android::hardware::camera::device::ErrorCode;
     long frameNumber = 0;
     using Tag = aidl::android::hardware::camera::device::NotifyMsg::Tag;
     switch (msg.getTag()) {
@@ -1920,19 +1890,25 @@ void CameraDeviceSession::sNotify(
                         break;
                 }
                 d->notify(error);
-            }            
+            }
             break;
         case CAMERA3_MSG_SHUTTER:
             {
                 NotifyMsg shutter;
-                // ALOGD("%s frameNumber:%d timestamp=%" PRId64" ",__FUNCTION__
-                // ,msg->message.shutter.frame_number
-                // ,msg->message.shutter.timestamp);
+                int32_t frameNumber = static_cast<int32_t>(msg->message.shutter.frame_number);
+                int64_t timestamp = static_cast<int64_t>(msg->message.shutter.timestamp);
+                int64_t readoutTimestamp = static_cast<int64_t>(msg->message.shutter.timestamp);
+                if(frameNumber ==1){
+                    readoutTimestamp += kDefaultSensorExposureTimeNs;
+                }else{
+                    readoutTimestamp += d->getSensorExposureTime();
+                }
+
                 shutter.set<NotifyMsg::Tag::shutter>(
                         ShutterMsg{
-                            .frameNumber = static_cast<int32_t>(msg->message.shutter.frame_number),
-                            .timestamp = static_cast<int64_t>(msg->message.shutter.timestamp),
-                            .readoutTimestamp = static_cast<int64_t>(msg->message.shutter.timestamp)+10000000,});
+                            .frameNumber = frameNumber,
+                            .timestamp = timestamp,
+                            .readoutTimestamp = readoutTimestamp});
                 d->notify(shutter);
             }
             break;
