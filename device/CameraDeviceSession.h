@@ -300,9 +300,16 @@ private:
             const AETriggerCancelOverride &aeTriggerCancelOverride,
             ::android::hardware::camera::common::V1_0::helper::CameraMetadata *settings /*out*/);
 
+    mutable Mutex mInflightExposureTimeLock;
+    std::map<int32_t, int64_t>  mInflightExposureTimeNs;
     int64_t mSensorExposureTimeNs;
     int64_t getSensorExposureTime(){
+        Mutex::Autolock _l(mInflightExposureTimeLock);
         return mSensorExposureTimeNs;
+    }
+    void setSensorExposureTime(int32_t frameNumber, int64_t expouserTimeNs){
+        Mutex::Autolock _l(mInflightExposureTimeLock);
+        mInflightExposureTimeNs[frameNumber] = expouserTimeNs;
     }
 };
 

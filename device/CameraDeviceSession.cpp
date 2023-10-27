@@ -1426,18 +1426,31 @@ void CameraDeviceSession::processCaptureResult(
         camera_metadata_ro_entry exposureTimeResult;
         exposureTimeResult.tag = ANDROID_SENSOR_EXPOSURE_TIME;
         find_camera_metadata_ro_entry(hal_result->result, ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeResult);
-        if (exposureTimeResult.count) {
-            mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
-        }
+        Mutex::Autolock _l(mInflightExposureTimeLock);
+        int64_t exposureTimeNs =mInflightExposureTimeNs[hal_result->frame_number];
         if(hal_result->frame_number == 1){
             settingsTmp = partialMetadata;
-            mSensorExposureTimeNs = kDefaultSensorExposureTimeNs;
-            settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &mSensorExposureTimeNs, 1);
+            exposureTimeNs = kDefaultSensorExposureTimeNs;
+            settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeNs, 1);
             partialMetadata = const_cast<camera_metadata_t*>(settingsTmp.getAndLock());
             metadata = metadataCompactRaw(partialMetadata);
             settingsTmp.unlock(partialMetadata);
+            if (exposureTimeResult.count && exposureTimeResult.data.i64[0] > 0) {
+                mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
+            }
         }else{
-            metadata = metadataCompactRaw(hal_result->result);
+            settingsTmp = partialMetadata;
+            if (exposureTimeResult.count && exposureTimeResult.data.i64[0] > 0 &&
+                exposureTimeResult.data.i64[0] !=exposureTimeNs) {
+                settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeNs, 1);
+            }
+            partialMetadata = const_cast<camera_metadata_t*>(settingsTmp.getAndLock());
+            metadata = metadataCompactRaw(partialMetadata);
+            settingsTmp.unlock(partialMetadata);
+            mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
+        }
+        if (mInflightExposureTimeNs.count(hal_result->frame_number)) {
+            mInflightExposureTimeNs.erase(hal_result->frame_number);
         }
     }
 
@@ -1898,11 +1911,11 @@ void CameraDeviceSession::sNotify(
                 int32_t frameNumber = static_cast<int32_t>(msg->message.shutter.frame_number);
                 int64_t timestamp = static_cast<int64_t>(msg->message.shutter.timestamp);
                 int64_t readoutTimestamp = static_cast<int64_t>(msg->message.shutter.timestamp);
-                if(frameNumber ==1){
-                    readoutTimestamp += kDefaultSensorExposureTimeNs;
-                }else{
-                    readoutTimestamp += d->getSensorExposureTime();
+                int64_t exposureTime = kDefaultSensorExposureTimeNs;
+                if(frameNumber > 1){
+                    exposureTime = d->getSensorExposureTime();
                 }
+                readoutTimestamp += exposureTime;
 
                 shutter.set<NotifyMsg::Tag::shutter>(
                         ShutterMsg{
