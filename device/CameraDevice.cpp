@@ -183,6 +183,22 @@ ScopedAStatus CameraDevice::isStreamCombinationSupported(
     return ScopedAStatus::ok();
 }
 
+Status CameraDevice::getAidlStatus(int status) {
+
+    ALOGD("%s: HAl returned status: %d!", __FUNCTION__, status);
+    switch (status) {
+        case 0: return Status::OK;
+        case -ENOSYS: return Status::OPERATION_NOT_SUPPORTED;
+        case -EBUSY : return Status::CAMERA_IN_USE;
+        case -EUSERS: return Status::MAX_CAMERAS_IN_USE;
+        case -ENODEV: return Status::INTERNAL_ERROR;
+        case -EINVAL: return Status::ILLEGAL_ARGUMENT;
+        default:
+            ALOGE("%s: unknown HAL status code %d", __FUNCTION__, status);
+            return Status::INTERNAL_ERROR;
+    }
+}
+
 ScopedAStatus CameraDevice::open(const std::shared_ptr<ICameraDeviceCallback>& callback,
         std::shared_ptr<ICameraDeviceSession>* session) {
 
@@ -197,7 +213,7 @@ ScopedAStatus CameraDevice::open(const std::shared_ptr<ICameraDeviceCallback>& c
 
     if (res != OK) {
         ALOGE("%s: cannot open camera %s!", __FUNCTION__, mCameraId.c_str());
-        return toScopedAStatus(Status::INTERNAL_ERROR);
+        return toScopedAStatus(getAidlStatus(res));
     }
     mHwCamera->setDevice(device);
     *session = ndk::SharedRefBase::make<CameraDeviceSession>(

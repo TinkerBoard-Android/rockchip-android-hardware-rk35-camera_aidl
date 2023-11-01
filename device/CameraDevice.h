@@ -39,6 +39,7 @@ using aidl::android::hardware::camera::device::ICameraDeviceSession;
 using aidl::android::hardware::camera::device::ICameraInjectionSession;
 using aidl::android::hardware::camera::device::RequestTemplate;
 using aidl::android::hardware::camera::device::StreamConfiguration;
+using aidl::android::hardware::camera::common::Status;
 
 using ndk::ScopedAStatus;
 
@@ -64,6 +65,7 @@ struct CameraDevice : public BnCameraDevice {
     ScopedAStatus getTorchStrengthLevel(int32_t* strength) override;
 
     CameraMetadataMap constructDefaultRequestSettings(RequestTemplate tpl) const;
+    static Status getAidlStatus(int);
 
     static std::string getPhysicalId(int index);
     static std::optional<int> parsePhysicalId(std::string_view str);
