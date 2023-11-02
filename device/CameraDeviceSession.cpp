@@ -1792,7 +1792,7 @@ bool CameraDeviceSession::handleAePrecaptureCancelRequestLocked(
         const camera3_capture_request_t &halRequest,
         ::android::hardware::camera::common::V1_0::helper::CameraMetadata *settings /*out*/,
          AETriggerCancelOverride *override /*out*/) {
-    if (/*(mDeviceVersion > CAMERA_DEVICE_API_VERSION_3_2) ||*/
+    if ((mDeviceVersion > CAMERA_DEVICE_API_VERSION_3_2) ||
             (nullptr == halRequest.settings) || (nullptr == settings) ||
             (0 == get_camera_metadata_entry_count(halRequest.settings))) {
         return false;
