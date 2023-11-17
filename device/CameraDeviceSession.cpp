@@ -1443,11 +1443,11 @@ void CameraDeviceSession::processCaptureResult(
             if (exposureTimeResult.count && exposureTimeResult.data.i64[0] > 0 &&
                 exposureTimeResult.data.i64[0] !=exposureTimeNs) {
                 settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeNs, 1);
+                mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
             }
             partialMetadata = const_cast<camera_metadata_t*>(settingsTmp.getAndLock());
             metadata = metadataCompactRaw(partialMetadata);
             settingsTmp.unlock(partialMetadata);
-            mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
         }
         if (mInflightExposureTimeNs.count(hal_result->frame_number)) {
             mInflightExposureTimeNs.erase(hal_result->frame_number);
