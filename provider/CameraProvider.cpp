@@ -42,13 +42,19 @@ using ::android::hardware::camera::common::V1_0::helper::VendorTagDescriptor;
 
 CameraProvider::CameraProvider(const int deviceIdBase,
                                Span<const device::implementation::hw::HwCameraFactory> availableCameras)
-        : mDeviceIdBase(deviceIdBase)
+        : camera_module_callbacks_t({sCameraDeviceStatusChange,
+                                   sTorchModeStatusChange})
+        ,mDeviceIdBase(deviceIdBase)
         , mAvailableCameras(availableCameras) {
     for (int i = 0; i < mAvailableCameras.size(); ++i) {
         auto hwCamera = mAvailableCameras[i]();
         if (hwCamera) {
             mModule =  hwCamera->getModule();
         }
+    }
+    if (mModule!=nullptr)
+    {
+        mModule->setCallbacks(this);
     }
 }
 
@@ -60,6 +66,10 @@ ScopedAStatus CameraProvider::setCallback(
         return toScopedAStatus(FAILURE(Status::ILLEGAL_ARGUMENT));
     }
     mCallback = callback;
+    if (mModule!=nullptr)
+    {
+        mModule->setCallbacks(this);
+    }
     return ScopedAStatus::ok();
 }
 
@@ -141,6 +151,72 @@ ScopedAStatus CameraProvider::isConcurrentStreamCombinationSupported(
     *support = false;
     return ScopedAStatus::ok();
 }
+
+/**
+ * static callback forwarding methods from HAL to instance
+ */
+void CameraProvider::sCameraDeviceStatusChange(
+        const struct camera_module_callbacks* callbacks,
+        int camera_id,
+        int new_status) {
+    CameraProvider* cp = const_cast<CameraProvider*>(
+            static_cast<const CameraProvider*>(callbacks));
+    if (cp == nullptr) {
+        ALOGE("%s: callback ops is null", __FUNCTION__);
+        return;
+    }
+
+    Mutex::Autolock _l(cp->mCbLock);
+    if (cp->mCallback == nullptr) {
+        // For camera connected before mCallback is set, the corresponding
+        // addDeviceNames() would be called later in setCallbacks().
+        return;
+    }
+
+    for (int i = 0; i < cp->mAvailableCameras.size(); ++i) {
+        auto hwCamera = cp->mAvailableCameras[i]();
+        if (hwCamera) {
+          std::string id =  hwCamera->getCameraId();
+          if (camera_id == atoi(id.c_str()) )
+          {
+            std::string cameraIdStr = CameraDevice::getPhysicalId(cp->mDeviceIdBase + camera_id);
+            CameraDeviceStatus status = (CameraDeviceStatus)new_status;
+            cp->mCallback->cameraDeviceStatusChange(cameraIdStr, status);
+          }
+        }
+    }
+}
+
+void CameraProvider::sTorchModeStatusChange(
+        const struct camera_module_callbacks* callbacks,
+        const char* camera_id,
+        int new_status) {
+    CameraProvider* cp = const_cast<CameraProvider*>(
+            static_cast<const CameraProvider*>(callbacks));
+
+    if (cp == nullptr) {
+        ALOGE("%s: callback ops is null", __FUNCTION__);
+        return;
+    }
+
+    Mutex::Autolock _l(cp->mCbLock);
+    if (cp->mCallback != nullptr) {
+        std::string cameraIdStr(camera_id);
+        for (int i = 0; i < cp->mAvailableCameras.size(); ++i) {
+            auto hwCamera = cp->mAvailableCameras[i]();
+            if (hwCamera) {
+                std::string id = hwCamera->getCameraId();
+                if (cameraIdStr.compare(id) == 0)
+                {
+                    cameraIdStr = CameraDevice::getPhysicalId(cp->mDeviceIdBase + atoi(camera_id));
+                    TorchModeStatus status = (TorchModeStatus) new_status;
+                    cp->mCallback->torchModeStatusChange(cameraIdStr, status);
+                }
+            }
+        }
+    }
+}
+
 
 }  // namespace implementation
 }  // namespace provider

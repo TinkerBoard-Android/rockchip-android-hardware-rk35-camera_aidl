@@ -55,8 +55,7 @@ using common::helper::VendorTagDescriptor;
 using android::hardware::camera::device::implementation::Span;
 using android::hardware::camera::device::implementation::CameraDevice;
 
-
-struct CameraProvider : public BnCameraProvider {
+struct CameraProvider : camera_module_callbacks_t,public BnCameraProvider {
     CameraProvider(int deviceIdBase, Span<const device::implementation::hw::HwCameraFactory> availableCameras);
     ~CameraProvider() override;
 
@@ -73,6 +72,16 @@ struct CameraProvider : public BnCameraProvider {
     ScopedAStatus isConcurrentStreamCombinationSupported(
             const std::vector<CameraIdAndStreamCombination>& in_configs,
             bool* support) override;
+public:
+    static void sCameraDeviceStatusChange(
+        const struct camera_module_callbacks* callbacks,
+        int camera_id,
+        int new_status);
+    static void sTorchModeStatusChange(
+        const struct camera_module_callbacks* callbacks,
+        const char* camera_id,
+        int new_status);
+    Mutex mCbLock;
 
 private:
     const int mDeviceIdBase;

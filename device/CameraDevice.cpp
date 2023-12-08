@@ -90,6 +90,20 @@ void convertToAidl(const camera_metadata_t* src, CameraMetadata* dest) {
     dest->metadata.assign(src_start, src_end);
 }
 
+Status getStatus(int status) {
+    switch (status) {
+        case 0: return Status::OK;
+        case -ENOSYS: return Status::OPERATION_NOT_SUPPORTED;
+        case -EBUSY : return Status::CAMERA_IN_USE;
+        case -EUSERS: return Status::MAX_CAMERAS_IN_USE;
+        case -ENODEV: return Status::INTERNAL_ERROR;
+        case -EINVAL: return Status::ILLEGAL_ARGUMENT;
+        default:
+            ALOGE("%s: unknown HAL status code %d", __FUNCTION__, status);
+            return Status::INTERNAL_ERROR;
+    }
+}
+
 
 }  // namespace
 
@@ -227,8 +241,18 @@ ScopedAStatus CameraDevice::openInjectionSession(
     return toScopedAStatus(FAILURE(Status::OPERATION_NOT_SUPPORTED));
 }
 
-ScopedAStatus CameraDevice::setTorchMode(const bool /*on*/) {
-    return toScopedAStatus(FAILURE(Status::OPERATION_NOT_SUPPORTED));
+ScopedAStatus CameraDevice::setTorchMode(const bool enable) {
+     if (!mHwCamera->getModule()->isSetTorchModeSupported()) {
+        toScopedAStatus(FAILURE(Status::OPERATION_NOT_SUPPORTED));
+    }
+
+    int ret =  mHwCamera->getModule()->setTorchMode(mCameraId.c_str(), enable);
+    Status status = getStatus(ret);
+    if (Status::OK != status)
+    {
+        return toScopedAStatus(status);
+    }
+    return ScopedAStatus::ok();
 }
 
 ScopedAStatus CameraDevice::turnOnTorchWithStrengthLevel(const int32_t /*strength*/) {
