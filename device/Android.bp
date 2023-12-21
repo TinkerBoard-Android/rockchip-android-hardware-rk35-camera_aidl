@@ -25,12 +25,23 @@ cc_library_shared {
         "ExternalCameraUtils.cpp",
         "convert.cpp",
         "RgaCropScale.cpp",
+        "osd.cpp"
     ],
     cflags: [
         "-Wno-error",
         "-DRK_DEVICE",
         "-DRK_HW_JPEG_DECODER",
     ],
+    product_variables: {
+        cameraSupportOSD: {
+            cppflags:[
+            "-DOSD_ENABLE",
+            ],
+            cflags:[
+            "-DOSD_ENABLE",
+            ]
+        },
+    },
     shared_libs: [
         "android.hardware.camera.common-V1-ndk",
         "android.hardware.camera.device-V2-ndk",
@@ -62,10 +73,13 @@ cc_library_shared {
         "librga",
         "libhwjpeg",
         "libmpp",
+        "libpng",
+        "libz",
     ],
     static_libs: [
         "android.hardware.camera.common@1.0-helper",
         "libaidlcommonsupport",
+        "libft2.nodep"
     ],
     header_libs: [
         "media_plugin_headers",

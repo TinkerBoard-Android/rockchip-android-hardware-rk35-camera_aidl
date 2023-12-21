@@ -37,11 +37,12 @@
 #include <ui/GraphicBufferAllocator.h>
 #include <ui/GraphicBufferMapper.h>
 
-
+#include <unordered_map>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+
 
 namespace android {
 namespace hardware {
@@ -58,33 +59,39 @@ int osd_logo_pos_x,osd_logo_pos_y;
 int  OSD_IMAGE_W;
 int  OSD_IMAGE_H;
 
-FT_Library    mLibrary;
-FT_Face       mFace;
-FT_GlyphSlot  mSlot;
-FT_Matrix     mMatrix;                 /* transformation matrix */
-FT_Vector     mPen;                    /* untransformed origin  */
+std::mutex sLock;
+bool sUseLogo = false;
+std::unordered_map<int, FT_Library> sMapLibrary;
+std::unordered_map<int, FT_Face> sMapFace;
+std::unordered_map<int, FT_GlyphSlot> sMapSlot;
+std::unordered_map<int, FT_Matrix> sMapMatrix;
+std::unordered_map<int, FT_Vector> sMapPen;
+std::unordered_map<int, uint32_t *> sMapPixelsLogo;
+std::unordered_map<int, buffer_handle_t> sMapHandleLogo;
+std::unordered_map<int, uint32_t *> sMapPixelsText;
+std::unordered_map<int, buffer_handle_t> sMapHandleText;
 
-void deInitFt() {
-	FT_Done_Face    (mFace);
-	FT_Done_FreeType(mLibrary);
+
+void deInitFt(int index) {
+  FT_Done_Face(sMapFace[index]);
+  FT_Done_FreeType(sMapLibrary[index]);
 }
 
-void resetFt() {
+void resetFt(int index) {
   double        angle;
   angle         = ( 0.0 / 360 ) * 3.14159 * 2;      /* use 25 degrees     */
   /* set up matrix */
-  mMatrix.xx = (FT_Fixed)( cos( angle ) * 0x10000L );
-  mMatrix.xy = (FT_Fixed)(-sin( angle ) * 0x10000L );
-  mMatrix.yx = (FT_Fixed)( sin( angle ) * 0x10000L );
-  mMatrix.yy = (FT_Fixed)( cos( angle ) * 0x10000L );
-
+  sMapMatrix[index].xx = (FT_Fixed)( cos( angle ) * 0x10000L );
+  sMapMatrix[index].xy = (FT_Fixed)(-sin( angle ) * 0x10000L );
+  sMapMatrix[index].yx = (FT_Fixed)( sin( angle ) * 0x10000L );
+  sMapMatrix[index].yy = (FT_Fixed)( cos( angle ) * 0x10000L );
   /* the pen position in 26.6 cartesian space coordinates; */
-  /* start at (0,40) relative to the upper left corner  */  
-  mPen.x = 0;
-  mPen.y = ( 5  ) * 64;
+  /* start at (0,40) relative to the upper left corner  */
+  sMapPen[index].x = 0;
+  sMapPen[index].y = ( 5  ) * 64;
 }
 
-int initFt() {
+int initFt(int index) {
 
   FT_Error      error;
 
@@ -92,19 +99,18 @@ int initFt() {
 
   angle         = ( 0.0 / 360 ) * 3.14159 * 2;      /* use 25 degrees     */
 
-  error = FT_Init_FreeType(&mLibrary);              /* initialize library */
-
+  error = FT_Init_FreeType(&sMapLibrary[index]);              /* initialize library */
 
   /* set up matrix */
-  mMatrix.xx = (FT_Fixed)( cos( angle ) * 0x10000L );
-  mMatrix.xy = (FT_Fixed)(-sin( angle ) * 0x10000L );
-  mMatrix.yx = (FT_Fixed)( sin( angle ) * 0x10000L );
-  mMatrix.yy = (FT_Fixed)( cos( angle ) * 0x10000L );
+  sMapMatrix[index].xx = (FT_Fixed)( cos( angle ) * 0x10000L );
+  sMapMatrix[index].xy = (FT_Fixed)(-sin( angle ) * 0x10000L );
+  sMapMatrix[index].yx = (FT_Fixed)( sin( angle ) * 0x10000L );
+  sMapMatrix[index].yy = (FT_Fixed)( cos( angle ) * 0x10000L );
 
   /* the pen position in 26.6 cartesian space coordinates; */
   /* start at (0,40) relative to the upper left corner  */
-  mPen.x = 0;
-  mPen.y = 0;
+  sMapPen[index].x = 0;
+  sMapPen[index].y = 0;
   return 0;
 }
 
@@ -123,7 +129,7 @@ void draw_bitmap( FT_Bitmap*  bitmap, unsigned char *buf,  FT_Int   x, FT_Int  y
   FT_Int  x_max = x + bitmap->width;
   FT_Int  y_max = y + bitmap->rows;
   //ALOGD("x_max:%d,y_max:%d",x_max,y_max);
-  int pixByte = 4;  
+  int pixByte = 4;
   for ( i = x, p = 0; i < x_max; i++, p++ )
   {
     for ( j = y, q = 0; j < y_max; j++, q++ )
@@ -137,67 +143,67 @@ void draw_bitmap( FT_Bitmap*  bitmap, unsigned char *buf,  FT_Int   x, FT_Int  y
     }
   }
 }
-void wchar2RGBA(wchar_t  *text, unsigned char *rgba, int w, int h) {
+void wchar2RGBA(wchar_t  *text, unsigned char *rgba, int w, int h,int index) {
     //FT_ENCODING_GB2312, FT_ENCODING_UNICODE
     int len = wcslen(text);
     for (int i=0; i<len; i++) {
       if(text[i]>127){
-        FT_New_Face(mLibrary,FONT_CN_FILE,0,&mFace);
+        FT_New_Face(sMapLibrary[index],FONT_CN_FILE,0,&sMapFace[index]);
       }
       else{
-        FT_New_Face(mLibrary,FONT_EN_FILE,0,&mFace);
+        FT_New_Face(sMapLibrary[index],FONT_EN_FILE,0,&sMapFace[index]);
       }
-      FT_Set_Pixel_Sizes(mFace, FONT_PIXEL, 0);
+      FT_Set_Pixel_Sizes(sMapFace[index], FONT_PIXEL, 0);
 
-       mSlot = mFace->glyph;
-       FT_Select_Charmap(mFace, FT_ENCODING_UNICODE);
-       FT_Set_Transform(mFace, &mMatrix, &mPen);
-       int result = FT_Load_Glyph(mFace, FT_Get_Char_Index(mFace, text[i]), FT_LOAD_DEFAULT);
+       sMapSlot[index] = sMapFace[index]->glyph;
+       FT_Select_Charmap(sMapFace[index], FT_ENCODING_UNICODE);
+       FT_Set_Transform(sMapFace[index], &sMapMatrix[index], &sMapPen[index]);
+       int result = FT_Load_Glyph(sMapFace[index], FT_Get_Char_Index(sMapFace[index], text[i]), FT_LOAD_DEFAULT);
 
        //FT_RENDER_MODE_MONO FT_RENDER_MODE_NORMAL 第二个参数为渲染模式
-        result = FT_Render_Glyph(mFace->glyph,  FT_RENDER_MODE_NORMAL);
-        FT_Bitmap bmp = mFace->glyph->bitmap;
+        result = FT_Render_Glyph(sMapFace[index]->glyph,  FT_RENDER_MODE_NORMAL);
+        FT_Bitmap bmp = sMapFace[index]->glyph->bitmap;
 
         //ALOGD("%s %d %c x:%d,y:%d,w:%d,h:%d",__FUNCTION__,__LINE__,text[i],mFace->glyph->bitmap_left,mFace->glyph->bitmap_top,w,h);
         draw_bitmap(&bmp, rgba,
-                              mFace->glyph->bitmap_left,
-                              h - mFace->glyph->bitmap_top, w, h);
-        mPen.x += mSlot->advance.x;
-        mPen.y += mSlot->advance.y;
+                              sMapFace[index]->glyph->bitmap_left,
+                              h - sMapFace[index]->glyph->bitmap_top, w, h);
+        sMapPen[index].x += sMapSlot[index]->advance.x;
+        sMapPen[index].y += sMapSlot[index]->advance.y;
     }
 }
-void getSize(wchar_t  *text, int *w,int *h) {
+void getSize(wchar_t  *text, int *w,int *h,int index) {
     int len = wcslen(text);
     for (int i=0; i<len; i++) {
         if(text[i]>127){
-            FT_New_Face(mLibrary,FONT_CN_FILE,0,&mFace);
+            FT_New_Face(sMapLibrary[index],FONT_CN_FILE,0,&sMapFace[index]);
         }
         else{
-            FT_New_Face(mLibrary,FONT_EN_FILE,0,&mFace);
+            FT_New_Face(sMapLibrary[index],FONT_EN_FILE,0,&sMapFace[index]);
         }
-       FT_Set_Pixel_Sizes(mFace, FONT_PIXEL, 0);
-       mSlot = mFace->glyph;
-       FT_Select_Charmap(mFace, FT_ENCODING_UNICODE);
+       FT_Set_Pixel_Sizes(sMapFace[index], FONT_PIXEL, 0);
+       sMapSlot[index] = sMapFace[index]->glyph;
+       FT_Select_Charmap(sMapFace[index], FT_ENCODING_UNICODE);
 
-       FT_Set_Transform(mFace, &mMatrix, &mPen);
-       int result = FT_Load_Glyph(mFace, FT_Get_Char_Index(mFace, text[i]), FT_LOAD_DEFAULT);
+       FT_Set_Transform(sMapFace[index], &sMapMatrix[index], &sMapPen[index]);
+       int result = FT_Load_Glyph(sMapFace[index], FT_Get_Char_Index(sMapFace[index], text[i]), FT_LOAD_DEFAULT);
 
        //FT_RENDER_MODE_MONO FT_RENDER_MODE_NORMAL 第二个参数为渲染模式
-        result = FT_Render_Glyph(mFace->glyph,  FT_RENDER_MODE_NORMAL);
-        FT_Bitmap bmp = mFace->glyph->bitmap;
+        result = FT_Render_Glyph(sMapFace[index]->glyph,  FT_RENDER_MODE_NORMAL);
+        FT_Bitmap bmp = sMapFace[index]->glyph->bitmap;
 
-        //ALOGD("%s %d %c x:%d,y:%d,w:%d,h:%d",__FUNCTION__,__LINE__,text[i],mFace->glyph->bitmap_left,mFace->glyph->bitmap_top,*w,*h);    
-        if(mFace->glyph->bitmap_left > *w){
-          *w = mFace->glyph->bitmap_left;
+        //ALOGD("%s %d %c x:%d,y:%d,w:%d,h:%d",__FUNCTION__,__LINE__,text[i],mFace->glyph->bitmap_left,mFace->glyph->bitmap_top,*w,*h);
+        if(sMapFace[index]->glyph->bitmap_left > *w){
+          *w = sMapFace[index]->glyph->bitmap_left;
         }
-        if(mFace->glyph->bitmap_top > *h){
-          *h = mFace->glyph->bitmap_top;
+        if(sMapFace[index]->glyph->bitmap_top > *h){
+          *h = sMapFace[index]->glyph->bitmap_top;
         }
-        mPen.x += mSlot->advance.x;
-        mPen.y += mSlot->advance.y;
+        sMapPen[index].x += sMapSlot[index]->advance.x;
+        sMapPen[index].y += sMapSlot[index]->advance.y;
     }
     *w += FONT_PIXEL;
-    ALOGD("%s %dx%d",__FUNCTION__,*w,*h);
+    //ALOGD("%s %dx%d",__FUNCTION__,*w,*h);
 }
 
 
@@ -244,14 +250,20 @@ void timeFormat2Timestamp(const char* strTimeFormat, time_t& timeStamp)
   timeStamp = mktime(timeinfo);
 }
 
-int DecodePNG(char* png_path,unsigned int* buf) {
+bool DecodePNG(char* png_path,unsigned int* buf) {
   FILE *fp;
-  fp = fopen(png_path, "rb");
   png_byte sig[8];
-  fread(sig, 1, 8, fp);
-  if(png_sig_cmp(sig, 0, 8)){
-    fclose(fp);
-    return 0;
+  fp = fopen(png_path, "rb");
+
+  if (fp != NULL) {
+    fread(sig, 1, 8, fp);
+    if(png_sig_cmp(sig, 0, 8)){
+      fclose(fp);
+      return false;
+    }
+  } else {
+      ALOGE("DecodePNG %s failed(%d, %s) file not exist",png_path,fp, strerror(errno));
+      return false;
   }
 
   png_structp png_ptr;
@@ -307,16 +319,18 @@ int DecodePNG(char* png_path,unsigned int* buf) {
   fclose(fp);
   png_free_data(png_ptr,info_ptr,PNG_FREE_ALL,-1);
   png_destroy_read_struct(&png_ptr,NULL,NULL);
-  return 0;
+  return true;
 }
 
-void processOSD(int width,int height,unsigned long dst_fd){
-  ALOGD("%s %dx%d",__FUNCTION__,width,height);
+void processOSD(int width,int height,unsigned long dst_fd,int index){
+  //ALOGD("%s %dx%d",__FUNCTION__,width,height);
+  RockchipRga& rkRga(RockchipRga::get());
+  std::lock_guard<std::mutex> lk(sLock);
   android::GraphicBufferAllocator& alloc(android::GraphicBufferAllocator::get());
-  static uint32_t *pixelsLogo = nullptr;
+  uint32_t *pixelsLogo = sMapPixelsLogo[index];
+  buffer_handle_t memHandle = sMapHandleLogo[index];
+
   if(pixelsLogo == nullptr){
-    static buffer_handle_t memHandle = nullptr;
-  
     const auto usage =
         GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_SW_READ_RARELY | GRALLOC_USAGE_SW_WRITE_OFTEN;
     unsigned pixelsPerLine;
@@ -333,22 +347,24 @@ void processOSD(int width,int height,unsigned long dst_fd){
     if (!pixelsLogo) {
         ALOGE("Camera failed to gain access to image buffer for writing");
     }
-    DecodePNG(PNG_LOGO,pixelsLogo);
+    sUseLogo = DecodePNG(PNG_LOGO,pixelsLogo);
+    sMapPixelsLogo[index] = pixelsLogo;
+    sMapHandleLogo[index] = memHandle;
   }
-  initFt();
-  
+  initFt(index);
+
   wchar_t text[128] = { 0 };
   getCSTTimeFormatUnicode(text);
 
   int w,h;
-  getSize(text,&w,&h);
+  getSize(text,&w,&h,index);
 
-  uint32_t *pixelsFont = nullptr;
+  uint32_t *pixelsFont = sMapPixelsText[index] ;
   int text_width =  ALIGN(w,16);
   int text_height =  FONT_PIXEL;
-  ALOGD("%s w:%d text_width:%d",__FUNCTION__,w,text_width);
+  //ALOGD("%s w:%d text_width:%d",__FUNCTION__,w,text_width);
 
-  buffer_handle_t textHandle = nullptr;
+  buffer_handle_t textHandle = sMapHandleText[index];
   if(pixelsFont == nullptr){
     const auto usage =
         GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_SW_READ_RARELY | GRALLOC_USAGE_SW_WRITE_OFTEN;
@@ -366,12 +382,13 @@ void processOSD(int width,int height,unsigned long dst_fd){
     if (!pixelsFont) {
         ALOGE("Camera failed to gain access to image buffer for writing");
     }
-    memset((unsigned char*)pixelsFont,0x00,text_width*text_height*4);
-    resetFt();
-    wchar2RGBA(text, (unsigned char*)pixelsFont, text_width, text_height);
-    deInitFt();
+    sMapPixelsText[index] = pixelsFont;
+    sMapHandleText[index] = textHandle;
   }
-
+  memset((unsigned char*)pixelsFont,0x00,text_width*text_height*4);
+  resetFt(index);
+  wchar2RGBA(text, (unsigned char*)pixelsFont, text_width, text_height,index);
+  deInitFt(index);
 	camera2::RgaCropScale::Params rgain, rgain0, rgaout;
 	unsigned char* timeOsdVddr = NULL;
 	unsigned char* labelOsdVddr = NULL;
@@ -392,12 +409,13 @@ void processOSD(int width,int height,unsigned long dst_fd){
 
   osd_time_pos_x = width - timeOsdWidth;
   osd_time_pos_y = height - timeOsdHeight;
+  osd_time_pos_y -= 16;
 
-  ALOGD("osd_time_pos_x:%d,osd_time_pos_y:%d",osd_time_pos_x,osd_time_pos_y);
-
+  //ALOGD("osd_time_pos_x:%d,osd_time_pos_y:%d",osd_time_pos_x,osd_time_pos_y);
+  rkRga.RkRgaGetBufferFd(textHandle, &timeOsdFd);
   rgain.fd = timeOsdFd;
 	rgain.fmt = HAL_PIXEL_FORMAT_RGBA_8888;
-	rgain.vir_addr = (char*)timeOsdVddr;
+	rgain.vir_addr = nullptr;
 	rgain.mirror = false;
 	rgain.width = timeOsdWidth;
 	rgain.height = timeOsdHeight;
@@ -420,28 +438,31 @@ void processOSD(int width,int height,unsigned long dst_fd){
 	rgaout.height_stride = height;
   camera2::RgaCropScale::Im2dBlit(&rgain, &rgaout);
 
-  ALOGD("labelOsdWidth:%d,labelOsdHeight:%d",labelOsdWidth,labelOsdHeight);
-  osd_logo_pos_x = width - labelOsdWidth;
-  osd_logo_pos_y = height - labelOsdHeight - 30;
-  //osd_logo_pos_y = 0;
-  ALOGD("osd_logo_pos_x:%d,osd_logo_pos_y:%d",osd_logo_pos_x,osd_logo_pos_y);
+  //ALOGD("labelOsdWidth:%d,labelOsdHeight:%d",labelOsdWidth,labelOsdHeight);
+  if (sUseLogo)
+  {
+    osd_logo_pos_x = width - labelOsdWidth - 20;
+    osd_logo_pos_y = height - labelOsdHeight - 30;
+    osd_logo_pos_y -= 16;
 
-  rgain0.fd = labelOsdFd;
-	rgain0.fmt = HAL_PIXEL_FORMAT_RGBA_8888;
-	rgain0.vir_addr = (char*)labelOsdVddr;
-	rgain0.mirror = false;
-	rgain0.width = labelOsdWidth;
-	rgain0.height = labelOsdHeight;
-	rgain0.offset_x = 0;
-	rgain0.offset_y = 0;
-	rgain0.width_stride = labelOsdWidth;
-	rgain0.height_stride = labelOsdHeight;
-	rgain0.translate_x = osd_logo_pos_x;
-	rgain0.translate_y = osd_logo_pos_y;
-	rgain0.blend = 1;
+    //ALOGD("osd_logo_pos_x:%d,osd_logo_pos_y:%d",osd_logo_pos_x,osd_logo_pos_y);
+    rkRga.RkRgaGetBufferFd(memHandle, &labelOsdFd);
+    rgain0.fd = labelOsdFd;
+    rgain0.fmt = HAL_PIXEL_FORMAT_RGBA_8888;
+    rgain0.vir_addr = nullptr;
+    rgain0.mirror = false;
+    rgain0.width = labelOsdWidth;
+    rgain0.height = labelOsdHeight;
+    rgain0.offset_x = 0;
+    rgain0.offset_y = 0;
+    rgain0.width_stride = labelOsdWidth;
+    rgain0.height_stride = labelOsdHeight;
+    rgain0.translate_x = osd_logo_pos_x;
+    rgain0.translate_y = osd_logo_pos_y;
+    rgain0.blend = 1;
 
-  camera2::RgaCropScale::Im2dBlit(&rgain0, &rgaout);
-  alloc.free(textHandle);
+    camera2::RgaCropScale::Im2dBlit(&rgain0, &rgaout);
+  }
 }
 
 

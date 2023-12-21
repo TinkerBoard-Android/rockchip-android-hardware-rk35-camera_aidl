@@ -68,10 +68,6 @@
 
 //#define DUMP_YUV
 
-#ifdef OSD_ENABLE
-#include "osd.h"
-#endif
-
 typedef struct Camerawindow {
     int left;
     int right;
@@ -2335,10 +2331,6 @@ bool VirtualDeviceSession::FormatConvertThread::threadLoop() {
                 frameInfo = _frameInfo;
             });
             //ALOGV("@%s receive frame(%d,%d)",__FUNCTION__,(int)frameInfo.width,(int)frameInfo.height);
-#ifdef OSD_ENABLE
-            if(frameInfo.width >0 && frameInfo.height>0)
-            android::hardware::camera::device::V3_4::implementation::processOSD(frameInfo.width,frameInfo.height,src_fd);
-#endif
         }
     }
 

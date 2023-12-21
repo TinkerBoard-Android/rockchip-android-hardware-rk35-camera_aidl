@@ -48,7 +48,9 @@
 #include <libyuv.h>
 #include <libyuv/convert.h>
 
-
+#ifdef OSD_ENABLE
+#include "osd.h"
+#endif
 
 #define PLANES_NUM 1
 
@@ -3773,7 +3775,13 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
             tempFrameHeight = ((tempFrameHeight + 15) & (~15));
         }
     }
-
+    int cameraId = std::stoi(req->cameraId.c_str());
+#ifdef OSD_ENABLE
+    if (isBlobOrYv12)
+    {
+        android::hardware::camera::device::V3_4::implementation::processOSD(tempFrameWidth,tempFrameHeight,req->mShareFd,cameraId);
+    }
+#endif
 #if 1
     //wpzz add
     if (mCameraCharacteristics.exists(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)) {
@@ -4193,6 +4201,16 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                 lk.unlock();
                 return onDeviceError("%s: unknown output format %x", __FUNCTION__, halBuf.format);
         }
+#ifdef OSD_ENABLE
+        const native_handle_t* tmp_hand = (const native_handle_t*)(*(halBuf.bufPtr));
+        int handle_fd = -1;
+        RockchipRga& rkRga(RockchipRga::get());
+        rkRga.RkRgaGetBufferFd(tmp_hand, &handle_fd);
+        if (handle_fd!= -1)
+        {
+            android::hardware::camera::device::V3_4::implementation::processOSD(halBuf.width,halBuf.height,handle_fd,cameraId);
+        }
+#endif
     }  // for each buffer
     mScaledYu12Frames.clear();
 

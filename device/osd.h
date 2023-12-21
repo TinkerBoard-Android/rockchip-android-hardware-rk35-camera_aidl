@@ -1,3 +1,4 @@
+#pragma once
 namespace android {
 namespace hardware {
 namespace camera {
@@ -10,7 +11,7 @@ namespace implementation {
 #define FONT_EN_FILE "/system/fonts/DroidSans.ttf"
 #define OSD_TEXT L"%04d年%02d月%02d日 %02d:%02d:%02d"
 
-extern void processOSD(int width,int height,unsigned long dst_fd);
+extern void processOSD(int width,int height,unsigned long dst_fd,int index);
 
 
 }  // namespace implementation
