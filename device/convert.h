@@ -32,6 +32,9 @@ namespace camera {
 namespace device {
 namespace implementation {
 
+#define RK_GRALLOC_USAGE_SPECIFY_STRIDE 1ULL << 30
+#define RK_GRALLOC_USAGE_RGA_ACCESS 1ULL << 56
+
 using ::aidl::android::hardware::camera::common::Status;
 using ::aidl::android::hardware::camera::device::BufferStatus;
 using ::aidl::android::hardware::camera::device::CameraMetadata;

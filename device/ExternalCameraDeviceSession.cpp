@@ -303,7 +303,10 @@ HandleImporter ExternalCameraDeviceSession::sHandleImporter;
 
 sp<GraphicBuffer> GraphicBuffer_Init(int width, int height,int format) {
     sp<GraphicBuffer> gb(new GraphicBuffer(width,height,format,
-                                           GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN));
+                                           GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                           RK_GRALLOC_USAGE_RGA_ACCESS |
+                                           RK_GRALLOC_USAGE_SPECIFY_STRIDE |
+                                           GRALLOC_USAGE_SW_READ_OFTEN));
     if (gb->initCheck()) {
         printf("GraphicBuffer check error : %s\n",strerror(errno));
         return NULL;
@@ -672,6 +675,11 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
         mStreamMap[in_requestedConfiguration.streams[i].id].usage = out[i].producerUsage =
                 static_cast<BufferUsage>(((int64_t)in_requestedConfiguration.streams[i].usage) |
                                          ((int64_t)BufferUsage::CPU_WRITE_OFTEN) |
+                                         ((int64_t)GRALLOC_USAGE_HW_VIDEO_ENCODER) |
+                                         ((int64_t)GRALLOC_USAGE_HW_CAMERA_WRITE) |
+                                         ((int64_t)RK_GRALLOC_USAGE_SPECIFY_STRIDE) |
+                                         ((int64_t)RK_GRALLOC_USAGE_RGA_ACCESS) |
+                                         ((int64_t)GRALLOC_USAGE_PRIVATE_1) |
                                          ((int64_t)BufferUsage::CAMERA_OUTPUT));
         out[i].consumerUsage = static_cast<BufferUsage>(0);
         out[i].maxBuffers = static_cast<int32_t>(mV4L2BufferCount);
