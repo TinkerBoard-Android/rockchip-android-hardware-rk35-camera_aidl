@@ -43,6 +43,11 @@ namespace {
 const std::array<uint32_t, /*size*/ 4> kSupportedFourCCs{
         {V4L2_PIX_FMT_MJPEG,V4L2_PIX_FMT_H264, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
 
+
+static uint Camera_Resolution[][2] = {{176,144},{320,240},{352,288},
+                     {640,480},/*{720,540},{800,600},/*{1280,720},{1280,960},{1920,1080},{2048,1536},{2560,1440},{2592,1944},{2592,1456},*/
+                     {0,0}};
+
 constexpr int MAX_RETRY = 5;                  // Allow retry v4l2 open failures a few times.
 constexpr int OPEN_RETRY_SLEEP_US = 100000;  // 100ms * MAX_RETRY = 0.5 seconds
 
@@ -779,12 +784,51 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
         ALOGE("%s: Init supported format list failed", __FUNCTION__);
         return UNKNOWN_ERROR;
     }
+    std::vector<SupportedV4L2Format> supportedFormatsAdd;
+
+    for (const auto& supportedFormat : mSupportedFormats)
+        supportedFormatsAdd.push_back(supportedFormat);
+
+    int i=0,j=0;
+	int element_count=0;
+	while(Camera_Resolution[i][0]>0 && Camera_Resolution[i][1]>0){
+		element_count++;
+		i++;
+	}
+
+    for (i = 0; i < element_count; i++) {
+        int nearbyIndex = -1;int offset = INT_MAX;
+        for (j = 0; j < mSupportedFormats.size(); j++) {
+            if (mSupportedFormats[j].fourcc != fourcc) continue;
+            int w = Camera_Resolution[i][0];
+            int h = Camera_Resolution[i][1];
+            if (mSupportedFormats[j].width == w && mSupportedFormats[j].height == h) break;
+            int value = mSupportedFormats[j].width*mSupportedFormats[j].height - w*h;
+            int curoffset = std::abs(value);
+            if (curoffset < offset) {
+                nearbyIndex = j;
+                offset = curoffset;
+            }
+        }
+
+        if (j == mSupportedFormats.size()) {// this preview size not support,add to support lists.
+            SupportedV4L2Format format {
+                            .width = static_cast<int32_t>(Camera_Resolution[i][0]),
+                            .height = static_cast<int32_t>(Camera_Resolution[i][1]),
+                            .fourcc = mSupportedFormats[nearbyIndex].fourcc,
+                            .frameRates = mSupportedFormats[nearbyIndex].frameRates
+                        };
+            ALOGD("add self preview size:%dx%d", format.width, format.height);
+            supportedFormatsAdd.push_back(format);
+        }
+    }
+    trimSupportedFormats(mCroppingType, &supportedFormatsAdd);
 
     std::vector<int32_t> streamConfigurations;
     std::vector<int64_t> minFrameDurations;
     std::vector<int64_t> stallDurations;
 
-    for (const auto& supportedFormat : mSupportedFormats) {
+    for (const auto& supportedFormat : supportedFormatsAdd) {
         if (supportedFormat.fourcc != fourcc) {
             // Skip 4CCs not meant for the halFormats
             continue;
