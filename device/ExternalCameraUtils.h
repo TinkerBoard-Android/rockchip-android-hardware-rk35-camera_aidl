@@ -130,6 +130,7 @@ struct SupportedV4L2Format {
         uint32_t durationDenominator;       // frame duration denominator. Ex: 30
         double getFramesPerSecond() const;  // FPS as double.        Ex: 30.0
     };
+    double maxFramerate;
     std::vector<FrameRate> frameRates;
 };
 

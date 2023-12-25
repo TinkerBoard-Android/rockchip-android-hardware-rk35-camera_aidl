@@ -598,8 +598,13 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
         uint32_t dim = (mCroppingType == VERTICAL) ? fmt.width : fmt.height;
         if (dim >= maxDim) {
             float aspectRatio = ASPECT_RATIO(fmt);
+            ALOGV("desiredAr(%f) aspectRatio(%f) :%c%c%c%c, w %d, h %d",
+                desiredAr,aspectRatio, fmt.fourcc & 0xFF,
+                (fmt.fourcc >> 8) & 0xFF, (fmt.fourcc >> 16) & 0xFF,
+                (fmt.fourcc >> 24) & 0xFF, fmt.width, fmt.height);
+
             if (isAspectRatioClose(aspectRatio, desiredAr)) {
-                v4l2Fmt = fmt;
+                v4l2Fmt_tmp = fmt;
                 // since mSupportedFormats is sorted by width then height, the first matching fmt
                 // will be the smallest one with matching aspect ratio
                 if ((fmt.fourcc == V4L2_PIX_FMT_MJPEG) || (fmt.fourcc == V4L2_PIX_FMT_NV16)
@@ -1560,7 +1565,7 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& 
 
         FD_ZERO(&fds);
         FD_SET(mV4l2Fd.get(), &fds);
-        tv.tv_sec = 2;
+        tv.tv_sec = 3;
         ALOGV("@%s(%d) select time begin ",__FUNCTION__,__LINE__);
         ts = select(mV4l2Fd.get() + 1, &fds, NULL, NULL, &tv);
         ALOGV("@%s(%d) select time done.",__FUNCTION__,__LINE__);
@@ -1599,7 +1604,7 @@ std::unique_ptr<V4L2Frame> ExternalCameraDeviceSession::dequeueV4l2FrameLocked(n
 
     FD_ZERO(&fds);
     FD_SET(mV4l2Fd.get(), &fds);
-    tv.tv_sec = 2;
+    tv.tv_sec = 3;
     std::unique_ptr<V4L2Frame> ret = nullptr;
     if (shutterTs == nullptr) {
         ALOGE("%s: shutterTs must not be null!", __FUNCTION__);
@@ -3739,7 +3744,11 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
         return false;
     };
 
-    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG && req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 && req->frameIn->mFourcc != V4L2_PIX_FMT_H264) {
+    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG &&
+          req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 &&
+          req->frameIn->mFourcc != V4L2_PIX_FMT_YUYV &&
+          req->frameIn->mFourcc != V4L2_PIX_FMT_H264) {
+
         return onDeviceError("%s: do not support V4L2 format %c%c%c%c", __FUNCTION__,
                              req->frameIn->mFourcc & 0xFF, (req->frameIn->mFourcc >> 8) & 0xFF,
                              (req->frameIn->mFourcc >> 16) & 0xFF,
@@ -4004,6 +4013,35 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
             signalRequestDone();
             return true;
        }
+    }
+
+    if (isBlobOrYv12 && req->frameIn->mFourcc == V4L2_PIX_FMT_YUYV) {
+        YCbCrLayout input;
+        input.y = (uint8_t*)req->inData;
+        input.yStride = mYu12Frame->mWidth;
+        input.cb = (uint8_t*)(req->inData) + mYu12Frame->mWidth * mYu12Frame->mHeight;
+        input.cStride = mYu12Frame->mWidth;
+        ALOGD("format is BLOB or YV12, use software YUYVtoI420");
+
+        ALOGV("%s libyuvToI420", __FUNCTION__);
+        ATRACE_BEGIN("YUYVtoI420");
+        int ret = libyuv::YUY2ToI420(
+            req->inData, (mYu12Frame->mWidth)*2, static_cast<uint8_t*>(mYu12FrameLayout.y), mYu12FrameLayout.yStride,
+            static_cast<uint8_t*>(mYu12FrameLayout.cb), mYu12FrameLayout.cStride,
+            static_cast<uint8_t*>(mYu12FrameLayout.cr), mYu12FrameLayout.cStride,
+            mYu12Frame->mWidth, mYu12Frame->mHeight);
+        ATRACE_END();
+        if (ret != 0) {
+            // For some webcam, the first few V4L2 frames might be malformed...
+            ALOGE("%s: Convert V4L2 frame to YU12 failed! res %d", __FUNCTION__, ret);
+            lk.unlock();
+            Status st = parent->processCaptureRequestError(req);
+            if (st != Status::OK) {
+                return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
+            }
+            signalRequestDone();
+            return true;
+        }
     }
 
     ATRACE_BEGIN("Wait for BufferRequest done");

@@ -40,11 +40,11 @@ namespace {
 // Other formats to consider in the future:
 // * V4L2_PIX_FMT_YVU420 (== YV12)
 // * V4L2_PIX_FMT_YVYU (YVYU: can be converted to YV12 or other YUV420_888 formats)
-const std::array<uint32_t, /*size*/ 3> kSupportedFourCCs{
-        {V4L2_PIX_FMT_MJPEG,V4L2_PIX_FMT_H264, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
+const std::array<uint32_t, /*size*/ 4> kSupportedFourCCs{
+        {V4L2_PIX_FMT_MJPEG,V4L2_PIX_FMT_H264, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
 
 constexpr int MAX_RETRY = 5;                  // Allow retry v4l2 open failures a few times.
-constexpr int OPEN_RETRY_SLEEP_US = 100'000;  // 100ms * MAX_RETRY = 0.5 seconds
+constexpr int OPEN_RETRY_SLEEP_US = 100000;  // 100ms * MAX_RETRY = 0.5 seconds
 
 const std::regex kDevicePathRE("/dev/video([0-9]+)");
 }  // namespace
@@ -262,6 +262,32 @@ void ExternalCameraDevice::initSupportedFormatsLocked(int fd) {
             mCroppingType = VERTICAL;
         }
     }
+    /* mSupportedFormats has been sorted by size
+       remove the same size format */
+    std::vector<SupportedV4L2Format> tmp;
+    for (int i = 0; i < mSupportedFormats.size(); ) {
+        if ((mSupportedFormats[i+1].width == mSupportedFormats[i].width) &&
+            (mSupportedFormats[i+1].height == mSupportedFormats[i].height)) {
+                if (mSupportedFormats[i+1].maxFramerate > mSupportedFormats[i].maxFramerate)
+                    tmp.push_back(mSupportedFormats[i+1]);
+                else
+                    tmp.push_back(mSupportedFormats[i]);
+                i = i + 2;
+         } else {
+            tmp.push_back(mSupportedFormats[i]);
+            i++;
+         }
+    }
+    mSupportedFormats = tmp;
+    /* Deternimate Cropping type */
+    const auto& maxSize = mSupportedFormats[mSupportedFormats.size() - 1];
+    float aspectRatio = ASPECT_RATIO(maxSize);
+    /* 4:3 = 1.3333 default VERTICAL, else 16:9 or 20:9 is HORIZONTAL*/
+    if (aspectRatio > 1.4)
+         mCroppingType = HORIZONTAL;
+    else
+        mCroppingType = VERTICAL;
+    ALOGD("%s: mCroppingType(%s)!", __FUNCTION__, (mCroppingType == VERTICAL) ? "VERTICAL" : "HORIZONTAL");
 }
 
 status_t ExternalCameraDevice::initCameraCharacteristics() {
@@ -333,6 +359,9 @@ status_t ExternalCameraDevice::initAvailableCapabilities(
                 hasDepth = true;
                 break;
             case V4L2_PIX_FMT_MJPEG:
+                hasColor = true;
+                break;
+            case V4L2_PIX_FMT_YUYV:
                 hasColor = true;
                 break;
             case V4L2_PIX_FMT_H264:
@@ -701,15 +730,13 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                 ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
                 ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
-    }
-    if (hasColor_nv12) {
+    } else if (hasColor_nv12) {
         initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_NV12, halFormats,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                 ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
                 ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
-    }
-    if (hasColor_h264) {
+    } else if (hasColor_h264) {
         initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_H264, halFormats,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
@@ -797,6 +824,12 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
             stallDurations.push_back(supportedFormat.height);
             stallDurations.push_back(stall_duration);
         }
+        ALOGV("supportedFormat:%c%c%c%c, w %d, h %d, minFrameDuration(%lld)",
+            supportedFormat.fourcc & 0xFF,
+            (supportedFormat.fourcc >> 8) & 0xFF,
+            (supportedFormat.fourcc >> 16) & 0xFF,
+            (supportedFormat.fourcc >> 24) & 0xFF,
+            supportedFormat.width, supportedFormat.height, minFrameDuration);
     }
 
     UPDATE(streamConfigurationKey, streamConfigurations.data(), streamConfigurations.size());
@@ -831,6 +864,8 @@ status_t ExternalCameraDevice::calculateMinFps(
         fpsRanges.push_back(framerate);
     }
     minFps /= 2;
+    if (0 == minFps)
+        minFps = 1;
     int64_t maxFrameDuration = 1000000000LL / minFps;
 
     UPDATE(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, fpsRanges.data(), fpsRanges.size());
@@ -847,12 +882,19 @@ void ExternalCameraDevice::getFrameRateList(int fd, double fpsUpperBound,
                                             SupportedV4L2Format* format) {
     format->frameRates.clear();
 
+    format->maxFramerate = 1.0f;
     v4l2_frmivalenum frameInterval{
             .index = 0,
             .pixel_format = format->fourcc,
             .width = static_cast<__u32>(format->width),
             .height = static_cast<__u32>(format->height),
     };
+    ALOGV("format:%c%c%c%c, w %d, h %d, fpsUpperBound %f",
+        frameInterval.pixel_format & 0xFF,
+        (frameInterval.pixel_format >> 8) & 0xFF,
+        (frameInterval.pixel_format >> 16) & 0xFF,
+        (frameInterval.pixel_format >> 24) & 0xFF,
+        frameInterval.width, frameInterval.height, fpsUpperBound);
 
     for (frameInterval.index = 0;
          TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &frameInterval)) == 0;
@@ -862,6 +904,9 @@ void ExternalCameraDevice::getFrameRateList(int fd, double fpsUpperBound,
                 SupportedV4L2Format::FrameRate fr = {frameInterval.discrete.numerator,
                                                      frameInterval.discrete.denominator};
                 double framerate = fr.getFramesPerSecond();
+                if (framerate > format->maxFramerate) {
+                    format->maxFramerate = framerate;
+                }
                 if (framerate > fpsUpperBound) {
                     continue;
                 }
@@ -1011,6 +1056,7 @@ void ExternalCameraDevice::trimSupportedFormats(CroppingType cropType,
     // Remove formats that has aspect ratio not croppable from largest size
     std::vector<SupportedV4L2Format> out;
     for (const auto& fmt : sortedFmts) {
+#if 0
         float ar = ASPECT_RATIO(fmt);
         if (isAspectRatioClose(ar, maxSizeAr)) {
             out.push_back(fmt);
@@ -1023,6 +1069,8 @@ void ExternalCameraDevice::trimSupportedFormats(CroppingType cropType,
                   fmt.width, fmt.height, cropType == VERTICAL ? "vertically" : "horizontally",
                   maxSize.width, maxSize.height);
         }
+#endif
+        out.push_back(fmt);
     }
     sortedFmts = out;
 }
