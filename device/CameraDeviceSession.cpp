@@ -1441,9 +1441,9 @@ void CameraDeviceSession::processCaptureResult(
         }else{
             settingsTmp = partialMetadata;
             if (exposureTimeResult.count && exposureTimeResult.data.i64[0] > 0 &&
-                exposureTimeResult.data.i64[0] !=exposureTimeNs) {
-                settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &exposureTimeNs, 1);
-                mSensorExposureTimeNs =   exposureTimeResult.data.i64[0];
+                exposureTimeResult.data.i64[0] !=mSensorExposureTimeNs) {
+                mSensorExposureTimeNs = exposureTimeResult.data.i64[0];
+                settingsTmp.update(ANDROID_SENSOR_EXPOSURE_TIME, &mSensorExposureTimeNs, 1);
             }
             partialMetadata = const_cast<camera_metadata_t*>(settingsTmp.getAndLock());
             metadata = metadataCompactRaw(partialMetadata);
