@@ -56,6 +56,7 @@
 
 #include "RgaCropScale.h"
 #include <RockchipRga.h>
+#include <cutils/properties.h>
 
 #define RGA_VIRTUAL_W (4096)
 #define RGA_VIRTUAL_H (4096)
@@ -595,6 +596,11 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
     SupportedV4L2Format v4l2Fmt{.width = 0, .height = 0};
     SupportedV4L2Format v4l2Fmt_tmp {.width = 0, .height = 0};
     for (const auto& fmt : mSupportedFormats) {
+        ALOGV("%c%c%c%c, w %d, h %d",
+            fmt.fourcc & 0xFF,
+            (fmt.fourcc >> 8) & 0xFF, (fmt.fourcc >> 16) & 0xFF,
+            (fmt.fourcc >> 24) & 0xFF, fmt.width, fmt.height);
+
         uint32_t dim = (mCroppingType == VERTICAL) ? fmt.width : fmt.height;
         if (dim >= maxDim) {
             float aspectRatio = ASPECT_RATIO(fmt);
@@ -607,9 +613,24 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
                 v4l2Fmt_tmp = fmt;
                 // since mSupportedFormats is sorted by width then height, the first matching fmt
                 // will be the smallest one with matching aspect ratio
-                if ((fmt.fourcc == V4L2_PIX_FMT_MJPEG) || (fmt.fourcc == V4L2_PIX_FMT_NV16)
-				||(fmt.fourcc == V4L2_PIX_FMT_BGR24 ) || (fmt.fourcc == V4L2_PIX_FMT_NV24) ||
-                    (fmt.fourcc == V4L2_PIX_FMT_NV12) || (fmt.fourcc == V4L2_PIX_FMT_H264)) {
+                char value[PROPERTY_VALUE_MAX]={0};
+                uint32_t fourcc;
+                property_get("persist.vendor.usbcamera.format", value, "mjpeg");
+
+                if(strstr(value,"mjpeg")){
+                    fourcc = V4L2_PIX_FMT_MJPEG;
+                } else if (strstr(value,"h264")){
+                    fourcc = V4L2_PIX_FMT_H264;
+                } else if (strstr(value,"yuyv")){
+                    fourcc = V4L2_PIX_FMT_YUYV;
+                } else {
+                    fourcc = V4L2_PIX_FMT_MJPEG;
+                }
+                ALOGV("Get default format:%c%c%c%c.",
+                fourcc & 0xFF, (fourcc >> 8) & 0xFF,
+                (fourcc >> 16) & 0xFF, (fourcc >> 24) & 0xFF);
+
+                if (fmt.fourcc == fourcc) {
                     v4l2Fmt_tmp = fmt;
                     break;
                 }
