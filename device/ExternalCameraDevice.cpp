@@ -272,7 +272,8 @@ void ExternalCameraDevice::initSupportedFormatsLocked(int fd) {
     std::vector<SupportedV4L2Format> tmp;
     for (int i = 0; i < mSupportedFormats.size(); ) {
         if ((mSupportedFormats[i+1].width == mSupportedFormats[i].width) &&
-            (mSupportedFormats[i+1].height == mSupportedFormats[i].height)) {
+            (mSupportedFormats[i+1].height == mSupportedFormats[i].height) &&
+            (mSupportedFormats[i+1].fourcc == mSupportedFormats[i].fourcc)) {
                 if (mSupportedFormats[i+1].maxFramerate > mSupportedFormats[i].maxFramerate)
                     tmp.push_back(mSupportedFormats[i+1]);
                 else
