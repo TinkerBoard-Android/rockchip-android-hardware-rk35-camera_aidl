@@ -65,6 +65,8 @@
 #include "im2d_api/im2d.hpp"
 #include "im2d_api/im2d_common.h"
 
+#define PLANES_NUM 1
+
 #define MPP_ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
 
 //#define DUMP_YUV
@@ -623,6 +625,8 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
                     fourcc = V4L2_PIX_FMT_H264;
                 } else if (strstr(value,"yuyv")){
                     fourcc = V4L2_PIX_FMT_YUYV;
+                } else if (strstr(value,"nv12")){
+                    fourcc = V4L2_PIX_FMT_NV12;
                 } else {
                     fourcc = V4L2_PIX_FMT_MJPEG;
                 }
@@ -1487,11 +1491,14 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& 
             fps = maxFps;
         }
     }
-
-    int fpsRet = setV4l2FpsLocked(fps);
-    if (fpsRet != 0 && fpsRet != -EINVAL) {
-        ALOGE("%s: set fps failed: %s", __FUNCTION__, strerror(fpsRet));
-        return fpsRet;
+    if (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) {
+        mV4l2StreamingFps = fps;
+    } else {
+        int fpsRet = setV4l2FpsLocked(fps);
+        if (fpsRet != 0 && fpsRet != -EINVAL) {
+            ALOGE("%s: set fps failed: %s", __FUNCTION__, strerror(fpsRet));
+            return fpsRet;
+        }
     }
 
     uint32_t v4lBufferCount = (fps >= kDefaultFps) ? mCfg.numVideoBuffers : mCfg.numStillBuffers;
@@ -1580,6 +1587,10 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& 
             buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
         buffer.memory = V4L2_MEMORY_MMAP;
+        if (V4L2_TYPE_IS_MULTIPLANAR(buffer.type)) {
+            buffer.m.planes = mPlanes;
+            buffer.length = PLANES_NUM;
+        }
         int ts;
         fd_set fds;
         struct timeval tv;
@@ -3768,7 +3779,8 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
     if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG &&
           req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 &&
           req->frameIn->mFourcc != V4L2_PIX_FMT_YUYV &&
-          req->frameIn->mFourcc != V4L2_PIX_FMT_H264) {
+          req->frameIn->mFourcc != V4L2_PIX_FMT_H264 &&
+          req->frameIn->mFourcc != V4L2_PIX_FMT_NV12) {
 
         return onDeviceError("%s: do not support V4L2 format %c%c%c%c", __FUNCTION__,
                              req->frameIn->mFourcc & 0xFF, (req->frameIn->mFourcc >> 8) & 0xFF,
@@ -4065,6 +4077,43 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
         }
     }
 
+    if (isBlobOrYv12 && req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
+        ALOGV("%s NV12toI420", __FUNCTION__);
+        ATRACE_BEGIN("NV12toI420");
+        ALOGD("format is BLOB or YV12, use software NV12ToI420");
+        YCbCrLayout input;
+        input.y = (uint8_t*)req->inData;
+        input.yStride = mYu12Frame->mWidth;
+        input.cb = (uint8_t*)(req->inData) + mYu12Frame->mWidth * mYu12Frame->mHeight;
+        input.cStride = mYu12Frame->mWidth;
+
+        int res = libyuv::NV12ToI420(
+                static_cast<uint8_t*>(input.y),
+                input.yStride,
+                static_cast<uint8_t*>(input.cb),
+                input.cStride,
+                static_cast<uint8_t*>(mYu12FrameLayout.y),
+                mYu12FrameLayout.yStride,
+                static_cast<uint8_t*>(mYu12FrameLayout.cb),
+                mYu12FrameLayout.cStride,
+                static_cast<uint8_t*>(mYu12FrameLayout.cr),
+                mYu12FrameLayout.cStride,
+                mYu12Frame->mWidth, mYu12Frame->mHeight);
+       ATRACE_END();
+
+       if (res != 0) {
+            // For some webcam, the first few V4L2 frames might be malformed...
+            ALOGE("%s: Convert V4L2 frame to YU12 failed! res %d", __FUNCTION__, res);
+            lk.unlock();
+            Status st = parent->processCaptureRequestError(req);
+            if (st != Status::OK) {
+                return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
+            }
+            signalRequestDone();
+            return true;
+       }
+    }
+
     ATRACE_BEGIN("Wait for BufferRequest done");
     res = waitForBufferRequestDone(&req->buffers);
     ATRACE_END();
@@ -4118,7 +4167,6 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
             } break;
             case PixelFormat::YCBCR_420_888:
             case PixelFormat::IMPLEMENTATION_DEFINED:
-#if 1
             case PixelFormat::YCRCB_420_SP: {
                 if (req->frameIn->mFourcc == V4L2_PIX_FMT_YUYV){
                     ALOGV("%s libyuvToI420", __FUNCTION__);
@@ -4199,7 +4247,29 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                         halBuf.width, halBuf.height, 100, false, true,
                         (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
                         false);
-                } else{
+                } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12){
+
+                    int handle_fd = -1, ret;
+                    const native_handle_t* tmp_hand = (const native_handle_t*)(*(halBuf.bufPtr));
+                    RockchipRga& rkRga(RockchipRga::get());
+                    ret = rkRga.RkRgaGetBufferFd(tmp_hand, &handle_fd);
+
+                    if (handle_fd == -1) {
+                        ALOGE("convert tmp_hand to dst_fd error");
+                        return -EINVAL;
+                    }
+                    ALOGV("%s(%d): halBuf handle_fd(%d)", __FUNCTION__, __LINE__, handle_fd);
+                    ALOGV("%s(%d) halbuf_wxh(%dx%d) frameNumber(%d)", __FUNCTION__, __LINE__,
+                        halBuf.width, halBuf.height, req->frameNumber);
+                    unsigned long vir_addr =  reinterpret_cast<unsigned long>(req->inData);
+                    camera2::RgaCropScale::rga_scale_crop(
+                        tempFrameWidth, tempFrameHeight, vir_addr,
+                        HAL_PIXEL_FORMAT_YCrCb_NV12, handle_fd,
+                        halBuf.width, halBuf.height, 100, false, true,
+                        (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
+                        true);
+                } else {
+
                     if (req->mShareFd <= 0) {
                         lk.unlock();
                         Status st = parent->processCaptureRequestError(req);
@@ -4225,7 +4295,7 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                         false);
                 }
             }break;
-#endif
+
             case PixelFormat::YV12: {
                 IMapper::Rect outRect{0, 0, static_cast<int32_t>(halBuf.width),
                                       static_cast<int32_t>(halBuf.height)};

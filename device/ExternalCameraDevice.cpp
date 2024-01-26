@@ -40,8 +40,8 @@ namespace {
 // Other formats to consider in the future:
 // * V4L2_PIX_FMT_YVU420 (== YV12)
 // * V4L2_PIX_FMT_YVYU (YVYU: can be converted to YV12 or other YUV420_888 formats)
-const std::array<uint32_t, /*size*/ 4> kSupportedFourCCs{
-        {V4L2_PIX_FMT_MJPEG,V4L2_PIX_FMT_H264, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
+const std::array<uint32_t, /*size*/ 5> kSupportedFourCCs{
+        {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_H264, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
 
 
 static uint Camera_Resolution[][2] = {{176,144},{320,240},{352,288},
@@ -371,6 +371,9 @@ status_t ExternalCameraDevice::initAvailableCapabilities(
                 hasColor = true;
                 break;
             case V4L2_PIX_FMT_H264:
+                hasColor = true;
+                break;
+            case V4L2_PIX_FMT_NV12:
                 hasColor = true;
                 break;
             default:
@@ -1007,9 +1010,21 @@ std::vector<SupportedV4L2Format> ExternalCameraDevice::getCandidateSupportedForm
         const std::vector<ExternalCameraConfig::FpsLimitation>& depthFpsLimits,
         const Size& minStreamSize, bool depthEnabled) {
     std::vector<SupportedV4L2Format> outFmts;
-    struct v4l2_fmtdesc fmtdesc {
-        .index = 0, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE
-    };
+
+    // VIDIOC_QUERYCAP get Capability
+     struct v4l2_capability capability;
+    int ret_query = ioctl(fd, VIDIOC_QUERYCAP, &capability);
+    if (ret_query < 0) {
+        ALOGE("%s v4l2 QUERYCAP %s failed: %s", __FUNCTION__, strerror(errno));
+    }
+
+    struct v4l2_fmtdesc fmtdesc{};
+    fmtdesc.index = 0;
+    if (capability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+        fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    else
+        fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
     int ret = 0;
     while (ret == 0) {
         ret = TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc));
@@ -1022,6 +1037,12 @@ std::vector<SupportedV4L2Format> ExternalCameraDevice::getCandidateSupportedForm
             fmtdesc.index++;
             continue;
         }
+        if ((capability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) &&
+            fmtdesc.pixelformat != V4L2_PIX_FMT_NV12) {
+            fmtdesc.index++;
+            continue;
+        }
+
         auto it =
                 std::find(kSupportedFourCCs.begin(), kSupportedFourCCs.end(), fmtdesc.pixelformat);
         if (it == kSupportedFourCCs.end()) {
