@@ -48,6 +48,12 @@ class RgaCropScale {
 		int dst_width, int dst_height,
 		int zoom_val, bool mirror, bool isNeedCrop,
 		bool isDstNV21, bool is16Align, bool isYuyvFormat);
+    static int rga_scale_crop_use_handle(
+		int src_width, int src_height,
+		unsigned int src_handle,int src_format, unsigned int dst_handle,
+		int dst_width, int dst_height,
+		int zoom_val, bool mirror, bool isNeedCrop,
+		bool isDstNV21, bool is16Align, bool isYuyvFormat);
 
 static int Im2dBlit(struct Params* in,  struct Params* out);
 
