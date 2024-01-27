@@ -243,8 +243,8 @@ Frame::Frame(uint32_t width, uint32_t height, uint32_t fourcc)
 Frame::~Frame() {}
 
 V4L2Frame::V4L2Frame(uint32_t w, uint32_t h, uint32_t fourcc, int bufIdx, int fd, uint32_t dataSize,
-                     uint64_t offset)
-    : Frame(w, h, fourcc), mBufferIndex(bufIdx), mFd(fd), mDataSize(dataSize), mOffset(offset) {}
+                     uint64_t offset, uint32_t buffds[])
+    : Frame(w, h, fourcc), mBufferIndex(bufIdx), mFd(fd), mDataSize(dataSize), mOffset(offset), mBufFd(buffds) {}
 
 V4L2Frame::~V4L2Frame() {
     unmap();
@@ -252,6 +252,10 @@ V4L2Frame::~V4L2Frame() {
 
 int V4L2Frame::getData(uint8_t** outData, size_t* dataSize) {
     return map(outData, dataSize);
+}
+
+int V4L2Frame::getFd() {
+    return mBufFd[mBufferIndex];
 }
 
 int V4L2Frame::map(uint8_t** data, size_t* dataSize) {

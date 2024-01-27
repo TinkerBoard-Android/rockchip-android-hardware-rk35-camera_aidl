@@ -407,6 +407,7 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
     size_t mV4L2BufferCount = 0;
     struct v4l2_plane mPlanes[1];
     struct v4l2_capability mCapability;
+    uint32_t mBufFd[8];
 
     static const int kBufferWaitTimeoutSec = 3;  // TODO: handle long exposure (or not allowing)
     std::mutex mV4l2BufferLock;                  // protect the buffer count and condition below

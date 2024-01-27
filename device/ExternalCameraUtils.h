@@ -152,10 +152,11 @@ struct Frame : public std::enable_shared_from_this<Frame> {
 class V4L2Frame : public Frame {
   public:
     V4L2Frame(uint32_t w, uint32_t h, uint32_t fourcc, int bufIdx, int fd, uint32_t dataSize,
-              uint64_t offset);
+              uint64_t offset, uint32_t buffds[]);
     virtual ~V4L2Frame();
 
     virtual int getData(uint8_t** outData, size_t* dataSize) override;
+    int getFd();
 
     const int mBufferIndex;  // for later enqueue
     int map(uint8_t** data, size_t* dataSize);
@@ -168,6 +169,7 @@ class V4L2Frame : public Frame {
     const uint64_t mOffset;  // used for mmap
     uint8_t* mData = nullptr;
     bool mMapped = false;
+    uint32_t* mBufFd = nullptr;
 };
 
 // A RAII class representing a CPU allocated YUV frame used as intermediate buffers

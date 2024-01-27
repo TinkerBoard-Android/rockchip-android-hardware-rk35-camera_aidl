@@ -1552,6 +1552,24 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& 
             ALOGE("%s: QBUF %d failed: %s", __FUNCTION__, i, strerror(errno));
             return -errno;
         }
+
+        struct v4l2_exportbuffer expbuf;
+        memset(&expbuf, 0, sizeof(expbuf));
+        expbuf.type = buffer.type;
+        expbuf.index = i;
+        if (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+            expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        else
+            expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        expbuf.plane = 0;
+        expbuf.flags = O_CLOEXEC;
+        if (TEMP_FAILURE_RETRY(ioctl(mV4l2Fd.get(), VIDIOC_EXPBUF, &expbuf)) < 0) {
+            ALOGE("%s: VIDIOC_EXPBUF %d failed: %s", __FUNCTION__, i,  strerror(errno));
+            //return -errno;
+        } else {
+            ALOGD("get dma buf(%d)-fd: %d", i, expbuf.fd);
+        }
+        mBufFd[i] = expbuf.fd;
     }
 
     {
@@ -1717,7 +1735,7 @@ std::unique_ptr<V4L2Frame> ExternalCameraDeviceSession::dequeueV4l2FrameLocked(n
     return std::make_unique<V4L2Frame>(mV4l2StreamingFmt.width, mV4l2StreamingFmt.height,
                                        mV4l2StreamingFmt.fourcc, buffer.index, mV4l2Fd.get(),
                                        (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].length : buffer.bytesused,
-                                       (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].m.mem_offset : buffer.m.offset);
+                                       (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].m.mem_offset : buffer.m.offset, mBufFd);
 }
 
 void ExternalCameraDeviceSession::enqueueV4l2Frame(const std::shared_ptr<V4L2Frame>& frame) {
@@ -1931,7 +1949,6 @@ int ExternalCameraDeviceSession::v4l2StreamOffLocked() {
             return -1;
         }
     }
-    mV4L2BufferCount = 0;
 
     // VIDIOC_STREAMOFF
     v4l2_buf_type capture_type;
@@ -1943,6 +1960,13 @@ int ExternalCameraDeviceSession::v4l2StreamOffLocked() {
         ALOGE("%s: STREAMOFF failed: %s", __FUNCTION__, strerror(errno));
         return -errno;
     }
+
+    for (int i = 0; i < mV4L2BufferCount; i++) {
+        ALOGD("close mBufFd[%d]=%d", i, mBufFd[i]);
+        if (mBufFd[i] != 0)
+            ::close(mBufFd[i]);
+    }
+    mV4L2BufferCount = 0;
 
     // VIDIOC_REQBUFS: clear buffers
     v4l2_requestbuffers req_buffers{};
