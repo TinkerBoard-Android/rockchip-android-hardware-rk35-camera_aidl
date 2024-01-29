@@ -743,6 +743,14 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
 
     mFirstRequest = true;
     mLastStreamConfigCounter = in_requestedConfiguration.streamConfigCounter;
+    for(auto it = mOutputThread->mFdHandleMap.begin(); it != mOutputThread->mFdHandleMap.end();) {
+        int rga_handle = it->second;
+        ALOGI("%s: release rga_handle(%d)", __FUNCTION__, rga_handle);
+        releasebuffer_handle(rga_handle);
+        ++it;
+    }
+    mOutputThread->mFdHandleMap.clear();
+
     return fromStatus(Status::OK);
 }
 
@@ -1646,6 +1654,14 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& 
     ALOGI("%s: start V4L2 streaming %dx%d@%ffps", __FUNCTION__, v4l2Fmt.width, v4l2Fmt.height, fps);
     mV4l2StreamingFmt = v4l2Fmt;
     mV4l2Streaming = true;
+    for(auto it = mOutputThread->mFdHandleMap.begin(); it != mOutputThread->mFdHandleMap.end();) {
+        int rga_handle = it->second;
+        ALOGI("%s: release rga_handle(%d)", __FUNCTION__, rga_handle);
+        releasebuffer_handle(rga_handle);
+        ++it;
+    }
+    mOutputThread->mFdHandleMap.clear();
+
     return OK;
 }
 
@@ -2995,8 +3011,18 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
 
     debugShowFPS(req->cameraId);
     // ALOGD("@%s(%d) proc frameNumber:%d, index:%d",__PRETTY_FUNCTION__,__LINE__,req->frameNumber,req->index);
-    if (req->frameIn->getData(&req->inData, &req->inDataSize) != 0) {
-         ALOGE("%s(%d)getData failed!\n", __FUNCTION__, __LINE__);
+    bool hasBlobOrYv12 = false;
+
+    for (auto& halBuf : req->buffers) {
+        if(halBuf.format == PixelFormat::BLOB || halBuf.format == PixelFormat::YV12) {
+            hasBlobOrYv12 = true;
+        }
+    }
+
+    if (hasBlobOrYv12 || req->frameIn->mFourcc != V4L2_PIX_FMT_NV12) {
+        if (req->frameIn->getData(&req->inData, &req->inDataSize) != 0) {
+             ALOGE("%s(%d)getData failed!\n", __FUNCTION__, __LINE__);
+        }
     }
     RockchipRga& rkRga(RockchipRga::get());
     sp<GraphicBuffer> buffer = mMapGraphicBuffer[req->index];
@@ -3148,7 +3174,9 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
         //convertFormat(tmpW,tmpH,RK_FORMAT_YCbCr_422_SP,HAL_PIXEL_FORMAT_YCrCb_NV12,inData,(void *)mVirAddr);
     } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_NV24) {
         //NV24ToNV12((unsigned char*)inData,(unsigned char*)mVirAddr,req->frameIn->mWidth,req->frameIn->mHeight);
-
+    } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
+        std::shared_ptr<V4L2Frame> v4l2Frame = std::static_pointer_cast<V4L2Frame>(req->frameIn);
+        req->mShareFd = v4l2Frame->getFd();
     }
 
     mFmtOutputThread->submitRequest(req);
@@ -3167,7 +3195,15 @@ ExternalCameraDeviceSession::OutputThread::OutputThread(
       mCameraCharacteristics(chars),
       mBufferRequestThread(bufReqThread) {}
 
-ExternalCameraDeviceSession::OutputThread::~OutputThread() {}
+ExternalCameraDeviceSession::OutputThread::~OutputThread() {
+    for(auto it = mFdHandleMap.begin(); it != mFdHandleMap.end();) {
+        int rga_handle = it->second;
+        ALOGD("%s: release rga_handle(%d)", __FUNCTION__, rga_handle);
+        releasebuffer_handle(rga_handle);
+        ++it;
+    }
+    mFdHandleMap.clear();
+}
 
 /*
 sp<GraphicBuffer> GraphicBuffer_Init(int width, int height,int format) {
@@ -4288,6 +4324,7 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                     ALOGV("%s(%d): halBuf handle_fd(%d)", __FUNCTION__, __LINE__, handle_fd);
                     ALOGV("%s(%d) halbuf_wxh(%dx%d) frameNumber(%d)", __FUNCTION__, __LINE__,
                         halBuf.width, halBuf.height, req->frameNumber);
+#if 0
                     unsigned long vir_addr =  reinterpret_cast<unsigned long>(req->inData);
                     camera2::RgaCropScale::rga_scale_crop(
                         tempFrameWidth, tempFrameHeight, vir_addr,
@@ -4295,6 +4332,39 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                         halBuf.width, halBuf.height, 100, false, true,
                         (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
                         true);
+#else
+                    /* rga import buffer optimized */
+                    unsigned int src_handle, dst_handle;
+                    im_handle_param_t param;
+
+                    if (mFdHandleMap.count(req->mShareFd) == 0) {
+                        param.width = tempFrameWidth;
+                        param.height = tempFrameHeight;
+                        param.format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                        src_handle = reinterpret_cast<unsigned int>(importbuffer_fd(req->mShareFd, &param));
+                        mFdHandleMap[req->mShareFd] = src_handle;
+                        ALOGD("src_handle = %d", src_handle);
+                    } else {
+                        src_handle = mFdHandleMap[req->mShareFd];
+                    }
+                    if (mFdHandleMap.count(handle_fd) == 0) {
+                        param.width = halBuf.width;
+                        param.height = halBuf.height;
+                        param.format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                        dst_handle = reinterpret_cast<unsigned int>(importbuffer_fd(handle_fd, &param));
+                        mFdHandleMap[handle_fd] = dst_handle;
+                        ALOGD("dst_handle = %d", dst_handle);
+                    } else {
+                        dst_handle = mFdHandleMap[handle_fd];
+                    }
+                    camera2::RgaCropScale::rga_scale_crop_use_handle(
+                    tempFrameWidth, tempFrameHeight, src_handle,
+                    HAL_PIXEL_FORMAT_YCrCb_NV12, dst_handle,
+                    halBuf.width, halBuf.height, 100, false, true,
+                    (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
+                    true);
+
+#endif
                 } else {
 
                     if (req->mShareFd <= 0) {

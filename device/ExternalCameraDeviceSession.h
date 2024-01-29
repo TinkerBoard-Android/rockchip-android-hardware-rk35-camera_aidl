@@ -188,6 +188,7 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
 
         // The remaining request list is returned for offline processing
         std::list<std::shared_ptr<HalRequest>> switchToOffline();
+        std::unordered_map<int, unsigned int> mFdHandleMap; // fd -> rga_handle map
 
       protected:
         static const int kFlushWaitTimeoutSec = 3;  // 3 sec
