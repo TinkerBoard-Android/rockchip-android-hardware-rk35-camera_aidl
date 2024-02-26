@@ -42,7 +42,19 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+#include <time.h>
 
+#define MS_REFRESH_INTERVAL 1000
+#define MS_PER_SEC 1000ULL
+#define NS_PER_SEC 1000000000ULL
+
+#define NS_PER_MS (NS_PER_SEC /MS_PER_SEC)
+
+static inline long get_time_diff_ms(struct timespec *from,
+struct timespec *to) {
+return (to->tv_sec - from->tv_sec) * (long)MS_PER_SEC +
+(to->tv_nsec - from->tv_nsec) / (long)NS_PER_MS;
+}
 
 namespace android {
 namespace hardware {
@@ -52,6 +64,8 @@ namespace V3_4 {
 namespace implementation {
 #define FONT_PIXEL 28
 #define ALIGN(value, align) ((value + align -1) & ~(align-1))
+
+
 
 int osd_time_pos_x,osd_time_pos_y;
 int osd_logo_pos_x,osd_logo_pos_y;
@@ -70,10 +84,13 @@ std::unordered_map<int, uint32_t *> sMapPixelsLogo;
 std::unordered_map<int, buffer_handle_t> sMapHandleLogo;
 std::unordered_map<int, uint32_t *> sMapPixelsText;
 std::unordered_map<int, buffer_handle_t> sMapHandleText;
+std::unordered_map<int, uint32_t> sMapTextWidth;
+std::unordered_map<int, uint32_t> sMapTextHeight;
+std::unordered_map<int, struct timespec> sMapLastTime;
+std::unordered_map<int, int> sMapTextLen;
 
 
 void deInitFt(int index) {
-  FT_Done_Face(sMapFace[index]);
   FT_Done_FreeType(sMapLibrary[index]);
 }
 
@@ -170,6 +187,7 @@ void wchar2RGBA(wchar_t  *text, unsigned char *rgba, int w, int h,int index) {
                               h - sMapFace[index]->glyph->bitmap_top, w, h);
         sMapPen[index].x += sMapSlot[index]->advance.x;
         sMapPen[index].y += sMapSlot[index]->advance.y;
+        FT_Done_Face(sMapFace[index]);
     }
 }
 void getSize(wchar_t  *text, int *w,int *h,int index) {
@@ -183,9 +201,11 @@ void getSize(wchar_t  *text, int *w,int *h,int index) {
         }
        FT_Set_Pixel_Sizes(sMapFace[index], FONT_PIXEL, 0);
        sMapSlot[index] = sMapFace[index]->glyph;
+
        FT_Select_Charmap(sMapFace[index], FT_ENCODING_UNICODE);
 
        FT_Set_Transform(sMapFace[index], &sMapMatrix[index], &sMapPen[index]);
+
        int result = FT_Load_Glyph(sMapFace[index], FT_Get_Char_Index(sMapFace[index], text[i]), FT_LOAD_DEFAULT);
 
        //FT_RENDER_MODE_MONO FT_RENDER_MODE_NORMAL 第二个参数为渲染模式
@@ -201,6 +221,7 @@ void getSize(wchar_t  *text, int *w,int *h,int index) {
         }
         sMapPen[index].x += sMapSlot[index]->advance.x;
         sMapPen[index].y += sMapSlot[index]->advance.y;
+        FT_Done_Face(sMapFace[index]);
     }
     *w += FONT_PIXEL;
     //ALOGD("%s %dx%d",__FUNCTION__,*w,*h);
@@ -323,7 +344,11 @@ bool DecodePNG(char* png_path,unsigned int* buf) {
 }
 
 void processOSD(int width,int height,unsigned long dst_fd,int index){
-  //ALOGD("%s %dx%d",__FUNCTION__,width,height);
+  struct timespec last_tm;
+  struct timespec curr_tm;
+  clock_gettime(CLOCK_MONOTONIC_COARSE, &last_tm);
+  clock_gettime(CLOCK_MONOTONIC_COARSE, &curr_tm);
+
   RockchipRga& rkRga(RockchipRga::get());
   std::lock_guard<std::mutex> lk(sLock);
   android::GraphicBufferAllocator& alloc(android::GraphicBufferAllocator::get());
@@ -351,13 +376,24 @@ void processOSD(int width,int height,unsigned long dst_fd,int index){
     sMapPixelsLogo[index] = pixelsLogo;
     sMapHandleLogo[index] = memHandle;
   }
-  initFt(index);
 
   wchar_t text[128] = { 0 };
   getCSTTimeFormatUnicode(text);
 
+  int textLen =  wcslen(text);
+
   int w,h;
-  getSize(text,&w,&h,index);
+  w = sMapTextWidth[index];
+  h = sMapTextHeight[index];
+  if (sMapTextLen[index]!=textLen)
+  {
+    initFt(index);
+    getSize(text,&w,&h,index);
+    deInitFt(index);
+    sMapTextWidth[index] = w;
+    sMapTextHeight[index] = h;
+    sMapTextLen[index] = textLen;
+  }
 
   uint32_t *pixelsFont = sMapPixelsText[index] ;
   int text_width =  ALIGN(w,16);
@@ -385,10 +421,18 @@ void processOSD(int width,int height,unsigned long dst_fd,int index){
     sMapPixelsText[index] = pixelsFont;
     sMapHandleText[index] = textHandle;
   }
-  memset((unsigned char*)pixelsFont,0x00,text_width*text_height*4);
-  resetFt(index);
-  wchar2RGBA(text, (unsigned char*)pixelsFont, text_width, text_height,index);
-  deInitFt(index);
+
+  if (get_time_diff_ms(&sMapLastTime[index],&curr_tm) >= MS_REFRESH_INTERVAL)
+  {
+    initFt(index);
+    resetFt(index);
+    memset((unsigned char*)pixelsFont,0x00,text_width*text_height*4);
+    wchar2RGBA(text, (unsigned char*)pixelsFont, text_width, text_height,index);
+    deInitFt(index);
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &sMapLastTime[index]);
+  }
+
+
 	camera2::RgaCropScale::Params rgain, rgain0, rgaout;
 	unsigned char* timeOsdVddr = NULL;
 	unsigned char* labelOsdVddr = NULL;
@@ -463,6 +507,8 @@ void processOSD(int width,int height,unsigned long dst_fd,int index){
 
     camera2::RgaCropScale::Im2dBlit(&rgain0, &rgaout);
   }
+  clock_gettime(CLOCK_MONOTONIC_COARSE, &curr_tm);
+  //ALOGD("%s(%d) use %ldms", __FUNCTION__,__LINE__,1(&last_tm,&curr_tm));
 }
 
 
