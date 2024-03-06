@@ -502,7 +502,8 @@ ScopedAStatus CameraDeviceSession::configureStreams(
         mStreamBufferCache.clearStreamInfo();
         for (uint32_t i = 0; i < stream_list.num_streams; i++) {
             camera3_stream_t* stream = streams[i];
-            halStreams[i].producerUsage =  static_cast<BufferUsage>(stream->usage);
+            halStreams[i].producerUsage =  static_cast<BufferUsage>(stream->usage |
+                          RK_GRALLOC_USAGE_RANGE_FULL | RK_GRALLOC_USAGE_YUV_COLOR_SPACE_BT601);
             ALOGD("stream:%d %dx%d priv:%p",i,stream->width,stream->height,stream->priv);
         }
 
