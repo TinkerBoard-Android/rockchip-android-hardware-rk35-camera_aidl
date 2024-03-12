@@ -66,6 +66,8 @@
 #include "im2d_api/im2d_common.h"
 
 #define PLANES_NUM 1
+#include <hardware/gralloc1.h>
+#define RK_GRALLOC_USAGE_RANGE_FULL GRALLOC1_CONSUMER_USAGE_PRIVATE_17
 
 #define MPP_ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
 
@@ -710,6 +712,7 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
                                          ((int64_t)RK_GRALLOC_USAGE_SPECIFY_STRIDE) |
                                          ((int64_t)RK_GRALLOC_USAGE_RGA_ACCESS) |
                                          ((int64_t)GRALLOC_USAGE_PRIVATE_1) |
+                                         ((int64_t)RK_GRALLOC_USAGE_RANGE_FULL) |
                                          ((int64_t)BufferUsage::CAMERA_OUTPUT));
         out[i].consumerUsage = static_cast<BufferUsage>(0);
         out[i].maxBuffers = static_cast<int32_t>(mV4L2BufferCount);

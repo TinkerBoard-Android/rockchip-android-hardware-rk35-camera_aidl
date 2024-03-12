@@ -37,6 +37,10 @@
 #include <fmq/MessageQueue.h>
 #include <aidl/android/hardware/camera/device/NotifyMsg.h>
 
+#include <hardware/gralloc1.h>
+#define RK_GRALLOC_USAGE_RANGE_FULL GRALLOC1_CONSUMER_USAGE_PRIVATE_17
+#define RK_GRALLOC_USAGE_YUV_COLOR_SPACE_BT601 GRALLOC1_CONSUMER_USAGE_PRIVATE_18
+
 namespace android {
 namespace hardware {
 namespace camera {
