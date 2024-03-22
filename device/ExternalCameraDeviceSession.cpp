@@ -3873,8 +3873,8 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
     bool isBlobOrYv12 = false;
     int tempFrameWidth  = mYu12Frame->mWidth;
     int tempFrameHeight = mYu12Frame->mHeight;
-    // ALOGD("%s(%d): mYu12Frame widthxheight: %dx%d",
-    //         __FUNCTION__, __LINE__, mYu12Frame->mWidth, mYu12Frame->mHeight);
+    ALOGV("%s(%d): mYu12Frame widthxheight: %dx%d",
+             __FUNCTION__, __LINE__, mYu12Frame->mWidth, mYu12Frame->mHeight);
     for (auto& halBuf : req->buffers) {
         if(halBuf.format == PixelFormat::BLOB || halBuf.format == PixelFormat::YV12) {
             isBlobOrYv12 = true;
@@ -3895,8 +3895,7 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
         android::hardware::camera::device::V3_4::implementation::processOSD(tempFrameWidth,tempFrameHeight,req->mShareFd,cameraId);
     }
 #endif
-#if 1
-    //wpzz add
+
     if (mCameraCharacteristics.exists(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)) {
         float max_digital_zoom = 1.0f;
         camera_metadata_ro_entry entry = mCameraCharacteristics.find(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
@@ -3963,7 +3962,6 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
         mapheight = mYu12Frame->mHeight;
     }
 
-#endif
     // Process camera mute state
     auto testPatternMode = req->setting.find(ANDROID_SENSOR_TEST_PATTERN_MODE);
     if (testPatternMode.count == 1) {
@@ -4390,12 +4388,81 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                         ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(tmp_hand));
                         return true;
                     }
-                    camera2::RgaCropScale::rga_scale_crop(
-                        tempFrameWidth, tempFrameHeight, req->mShareFd,
-                        HAL_PIXEL_FORMAT_YCrCb_NV12, handle_fd,
-                        halBuf.width, halBuf.height, 100, false, true,
-                        (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
-                        false);
+
+                    ALOGV("@%s halBuf handle_fd(%d) halbuf_wxh(%dx%d) frameNumber(%d)", __FUNCTION__, handle_fd,
+                        halBuf.width, halBuf.height, req->frameNumber);
+                    // do digital zoom
+                    //camera2::RgaCropScale::Params rgain, rgaout;
+                    rgain.fd = req->mShareFd;
+                    rgain.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                    //rgain.vir_addr = reinterpret_cast<char*>(req->mVirAddr);
+                    rgain.width = mapwidth;
+                    rgain.height = mapheight;
+                    rgain.offset_x = mapleft;
+                    rgain.offset_y = maptop;
+                    rgain.width_stride = tempFrameWidth;
+                    rgain.height_stride = tempFrameHeight;
+
+                    rgaout.fd = handle_fd;
+                    rgaout.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                    //rgaout.vir_addr = reinterpret_cast<char*>(halBuf.bufPtr);
+                    rgaout.mirror = false;
+                    rgaout.width = halBuf.width;
+                    rgaout.height = halBuf.height;
+                    rgaout.offset_x = 0;
+                    rgaout.offset_y = 0;
+                    rgaout.width_stride = halBuf.width;
+                    rgaout.height_stride = halBuf.height;
+                    ALOGV("%s: digital zoom by RGA start!\n", __FUNCTION__);
+                    if (camera2::RgaCropScale::CropScaleNV12Or21(&rgain, &rgaout)) {
+                        ALOGW("%s: digital zoom by RGA failed, use software scale!\n", __FUNCTION__);
+                        IMapper::Rect outRect {0, 0,
+                                static_cast<int32_t>(halBuf.width),
+                                static_cast<int32_t>(halBuf.height)};
+                        YCbCrLayout outLayout = sHandleImporter.lockYCbCr(
+                                *(halBuf.bufPtr), static_cast<uint64_t>(halBuf.usage), outRect);
+                        ALOGV("%s: outLayout y %p cb %p cr %p y_str %d c_str %d c_step %d",
+                                __FUNCTION__, outLayout.y, outLayout.cb, outLayout.cr,
+                                outLayout.yStride, outLayout.cStride, outLayout.chromaStep);
+
+                        // Convert to output buffer size/format
+                        uint32_t outputFourcc = getFourCcFromLayout(outLayout);
+                        ALOGV("%s: converting to format %c%c%c%c", __FUNCTION__,
+                                outputFourcc & 0xFF,
+                                (outputFourcc >> 8) & 0xFF,
+                                (outputFourcc >> 16) & 0xFF,
+                                (outputFourcc >> 24) & 0xFF);
+
+                        YCbCrLayout cropAndScaled;
+                        ATRACE_BEGIN("cropAndScaleLocked");
+                        ret = cropAndScaleLocked(
+                                mYu12Frame,
+                                Size { halBuf.width, halBuf.height },
+                                &cropAndScaled);
+                        ATRACE_END();
+                        if (ret != 0) {
+                            lk.unlock();
+                            return onDeviceError("%s: crop and scale failed!", __FUNCTION__);
+                        }
+                        Size sz {halBuf.width, halBuf.height};
+                        ATRACE_BEGIN("formatConvert");
+                        ret = formatConvert(cropAndScaled, outLayout, sz, outputFourcc);
+                        ATRACE_END();
+                        if (ret != 0) {
+                            lk.unlock();
+                            return onDeviceError("%s: format coversion failed!", __FUNCTION__);
+                        }
+                        int relFence = sHandleImporter.unlock(*(halBuf.bufPtr));
+                        if (relFence >= 0) {
+                            halBuf.acquireFence = relFence;
+                        }
+                    }else {
+                        ALOGV("%s: digital zoom by RGA finished!\n", __FUNCTION__);
+                    }
+                    if (isJpegNeedCropScale) {
+                        isJpegNeedCropScale = false;
+                    }
+
                 }
             }break;
 
