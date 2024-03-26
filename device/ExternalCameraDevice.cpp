@@ -827,6 +827,7 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
         }
     }
     trimSupportedFormats(mCroppingType, &supportedFormatsAdd);
+    mSupportedFormats = supportedFormatsAdd;
 
     std::vector<int32_t> streamConfigurations;
     std::vector<int64_t> minFrameDurations;

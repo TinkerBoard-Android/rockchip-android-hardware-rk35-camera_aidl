@@ -580,10 +580,10 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
 
     // Now select a V4L2 format to produce all output streams
     float desiredAr = (mCroppingType == VERTICAL) ? kMaxAspectRatio : kMinAspectRatio;
-    uint32_t maxDim = 0;
+    uint32_t maxDim = 0, maxDimH;
     for (const auto& stream : in_requestedConfiguration.streams) {
         float aspectRatio = ASPECT_RATIO(stream);
-        ALOGI("%s: request stream %dx%d", __FUNCTION__, stream.width, stream.height);
+        ALOGI("%s: request stream %dx%d@0x%x", __FUNCTION__, stream.width, stream.height, stream.format);
         if ((mCroppingType == VERTICAL && aspectRatio < desiredAr) ||
             (mCroppingType == HORIZONTAL && aspectRatio > desiredAr)) {
             desiredAr = aspectRatio;
@@ -593,6 +593,7 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
         uint32_t dim = (mCroppingType == VERTICAL) ? stream.width : stream.height;
         if (dim > maxDim) {
             maxDim = dim;
+            maxDimH = (mCroppingType == VERTICAL) ? stream.height : stream.width;
         }
     }
 
@@ -600,7 +601,8 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
     SupportedV4L2Format v4l2Fmt{.width = 0, .height = 0};
     SupportedV4L2Format v4l2Fmt_tmp {.width = 0, .height = 0};
     for (const auto& fmt : mSupportedFormats) {
-        ALOGV("%c%c%c%c, w %d, h %d",
+        ALOGV("@%s: %c%c%c%c, w %d, h %d",
+            __FUNCTION__,
             fmt.fourcc & 0xFF,
             (fmt.fourcc >> 8) & 0xFF, (fmt.fourcc >> 16) & 0xFF,
             (fmt.fourcc >> 24) & 0xFF, fmt.width, fmt.height);
@@ -654,6 +656,20 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
                     (mCroppingType == HORIZONTAL && aspectRatio > desiredAr)) {
                     v4l2Fmt = fmt;
                     break;
+                }
+            }
+        }
+    }
+    if (v4l2Fmt.width == 0) {
+        // Cannot find exact good aspect ratio candidate, try to find a close one
+        int offset = INT_MAX;
+        for (const auto& fmt : mSupportedFormats) {
+            uint32_t dim = (mCroppingType == VERTICAL) ? fmt.width : fmt.height;
+            uint32_t dimH = (mCroppingType == VERTICAL) ? fmt.height : fmt.width;
+            if (dim >= maxDim && dimH >= maxDimH) {
+                if ((dim - maxDim) < offset) {
+                     offset = dim - maxDim;
+                     v4l2Fmt = fmt;
                 }
             }
         }
@@ -1836,6 +1852,8 @@ bool ExternalCameraDeviceSession::isSupported(
     // ignoring v4l2Fmt.fourcc for now. Might need more subtle check if we support more v4l format
     // in the futrue.
     for (const auto& v4l2Fmt : supportedFormats) {
+        ALOGI("%s: supportedFormats: %dx%d.", __FUNCTION__, v4l2Fmt.width, v4l2Fmt.height);
+
         if (width == v4l2Fmt.width && height == v4l2Fmt.height) {
             return true;
         }
