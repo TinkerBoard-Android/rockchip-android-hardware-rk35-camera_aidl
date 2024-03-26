@@ -15,7 +15,7 @@
  */
 
 #define LOG_TAG "ExtCamPrvdr"
-// #define LOG_NDEBUG 0
+//#define LOG_NDEBUG 0
 
 #include "ExternalCameraProvider.h"
 
@@ -47,6 +47,7 @@ constexpr char kDevicePath[] = "/dev/";
 constexpr char kPrefix[] = "video";
 constexpr int kPrefixLen = sizeof(kPrefix) - 1;
 constexpr int kDevicePrefixLen = sizeof(kDevicePath) + kPrefixLen - 1;
+static int cameraCount = 0;
 
 bool matchDeviceName(int cameraIdOffset, const std::string& deviceName, std::string* deviceVersion,
                      std::string* cameraDevicePath) {
@@ -67,6 +68,9 @@ bool matchDeviceName(int cameraIdOffset, const std::string& deviceName, std::str
 ExternalCameraProvider::ExternalCameraProvider() : mCfg(ExternalCameraConfig::loadFromCfg()) {
     mHotPlugThread = std::make_shared<HotplugThread>(this);
     mHotPlugThread->run();
+    cameraCount = 0;
+    property_set("vendor.vehicle.camera.count", "0");
+    property_set("vendor.vehicle.camera.ready", "false");
 }
 
 ExternalCameraProvider::~ExternalCameraProvider() {
@@ -215,6 +219,10 @@ void ExternalCameraProvider::deviceAdded(const char* devName) {
     }
     deviceImpl.reset();
     addExternalCamera(devName);
+    cameraCount++;
+    std::string cameraCount_str = std::to_string(cameraCount);
+    ALOGD("%s cameraCount(%d)", __FUNCTION__, cameraCount);
+    property_set("vendor.vehicle.camera.count", cameraCount_str.c_str());
 }
 
 void ExternalCameraProvider::deviceRemoved(const char* devName) {
@@ -235,6 +243,10 @@ void ExternalCameraProvider::deviceRemoved(const char* devName) {
     if (mCallback != nullptr) {
         mCallback->cameraDeviceStatusChange(deviceName, CameraDeviceStatus::NOT_PRESENT);
     }
+    cameraCount--;
+    std::string cameraCount_str = std::to_string(cameraCount);
+    ALOGD("%s cameraCount(%d)", __FUNCTION__, cameraCount);
+    property_set("vendor.vehicle.camera.count", cameraCount_str.c_str());
 }
 
 void ExternalCameraProvider::updateAttachedCameras() {
@@ -261,6 +273,11 @@ void ExternalCameraProvider::updateAttachedCameras() {
         }
     }
     closedir(devdir);
+    ALOGD("%s cameraCount(%d)", __FUNCTION__, cameraCount);
+    if (cameraCount > 0) {
+        ALOGD("%s camera register OK!", __FUNCTION__);
+        property_set("vendor.vehicle.camera.ready", "true");
+    }
 }
 
 // Start ExternalCameraProvider::HotplugThread functions
@@ -302,6 +319,7 @@ bool ExternalCameraProvider::HotplugThread::initialize() {
 
 bool ExternalCameraProvider::HotplugThread::threadLoop() {
     // Initialize inotify descriptors if needed.
+loop_dir:
     if (!mIsInitialized && !initialize()) {
         return true;
     }
@@ -331,6 +349,7 @@ bool ExternalCameraProvider::HotplugThread::threadLoop() {
     }
     // mPollFd.revents must contain POLLIN, so safe to reset it before reading
     mPollFd.revents = 0;
+    ALOGI("%s start monitoring new V4L2 devices", __FUNCTION__);
 
     uint64_t offset = 0;
     ssize_t ret = read(mINotifyFD, mEventBuf, sizeof(mEventBuf));
@@ -341,6 +360,13 @@ bool ExternalCameraProvider::HotplugThread::threadLoop() {
 
     while (offset < ret) {
         struct inotify_event* event = (struct inotify_event*)&mEventBuf[offset];
+        ALOGD("----debug: event->name = %s----", event->name);
+        if (!strncmp("vehicle", event->name, sizeof("vehicle") -1)) {
+            ALOGD("----init vehicle video devices start!---\n");
+            mIsInitialized = false;
+            goto loop_dir;
+        }
+
         offset += sizeof(struct inotify_event) + event->len;
 
         if (event->wd != mWd) {
@@ -364,8 +390,13 @@ bool ExternalCameraProvider::HotplugThread::threadLoop() {
         snprintf(v4l2DevicePath, kMaxDevicePathLen, "%s%s", kDevicePath, event->name);
 
         if (event->mask & IN_CREATE) {
+            ALOGD("---debug add device: v4l2DevicePath: %s, event->name: %s",
+                  v4l2DevicePath, event->name);
+
             mParent->deviceAdded(v4l2DevicePath);
         } else if (event->mask & IN_DELETE) {
+            ALOGD("---debug remove device: v4l2DevicePath: %s, event->name: %s",
+                  v4l2DevicePath, event->name);
             mParent->deviceRemoved(v4l2DevicePath);
         }
     }
