@@ -262,7 +262,9 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         Status submitRequest(const std::shared_ptr<HalRequest>&);
         bool threadLoop() override;
     #ifdef RK_DEVICE
-            std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
+        std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
+        unsigned long mShareFds[8];
+        unsigned long mVirAddrs[8];
     #endif
     private:
         const std::weak_ptr<OutputThreadInterface> mParent;

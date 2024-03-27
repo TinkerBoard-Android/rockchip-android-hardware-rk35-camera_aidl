@@ -342,10 +342,17 @@ ExternalCameraDeviceSession::ExternalCameraDeviceSession(
 void ExternalCameraDeviceSession::createPreviewBuffer(){
     int tempWidth = (mV4l2StreamingFmt.width + 15) & (~15);
     int tempHeight = (mV4l2StreamingFmt.height + 15) & (~15);
+    RockchipRga& rkRga(RockchipRga::get());
+    int src_fd;
 
-    for(int i = 0; i< mCfg.numVideoBuffers; i ++){
-        ALOGD("alloc buffer %d W:H=%dx%d", i, tempWidth, tempHeight);
+    for(int i = 0; i< mCfg.numVideoBuffers; i++){
         mFormatConvertThread->mMapGraphicBuffer[i] = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
+        sp<GraphicBuffer> buffer = mFormatConvertThread->mMapGraphicBuffer[i];
+        buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&mFormatConvertThread->mVirAddrs[i]);
+        buffer->unlock();
+        int ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
+        mFormatConvertThread->mShareFds[i] = src_fd;
+        ALOGD("alloc buffer %d W:H=%dx%d, fd:0x%x.", i, tempWidth, tempHeight, src_fd);
     }
 }
 
@@ -3042,18 +3049,8 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
              ALOGE("%s(%d)getData failed!\n", __FUNCTION__, __LINE__);
         }
     }
-    RockchipRga& rkRga(RockchipRga::get());
-    sp<GraphicBuffer> buffer = mMapGraphicBuffer[req->index];
-    buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&req->mVirAddr);
-    buffer->unlock();
-    int src_fd,dst_fd;
-    int ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
-    if (ret){
-        ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(buffer->handle));
-        return true;
-    }
-
-    req->mShareFd = src_fd;
+    req->mShareFd = mShareFds[req->index];
+    req->mVirAddr = mVirAddrs[req->index];
 
     //ALOGD("%s(%d)mShareFd(%d) mVirAddr(%p)!\n", __FUNCTION__, __LINE__, req->mShareFd, req->mVirAddr);
 
@@ -3100,6 +3097,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
     } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_H264) {
 
         MPP_RET err = MPP_OK;
+        int ret;
 
         uint64_t pts = 0;
         uint32_t tryCount = 0;
