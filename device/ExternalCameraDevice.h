@@ -100,6 +100,7 @@ class ExternalCameraDevice : public BnCameraDevice {
     // Helper function for initOutputCharskeys
     template <size_t SIZE>
     status_t initOutputCharsKeysByFormat(
+            int fd,
             ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata,
             uint32_t fourcc, const std::array<int, SIZE>& halFormats, int streamConfigTag,
             int streamConfiguration, int minFrameDuration, int stallDuration);

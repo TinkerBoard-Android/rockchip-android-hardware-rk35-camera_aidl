@@ -43,10 +43,34 @@ namespace {
 const std::array<uint32_t, /*size*/ 5> kSupportedFourCCs{
         {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_H264, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
 
+static uint Camera_Resolution_Vehicle[][2] =
+{
+    {720,  480},
+    {720,  576},
+    {960,  480},
+    {960,  576},
+    {1280, 720},
+    {1920, 1080},
+    //{176,144},
+    //{320,240},
+    //{352,288},
+    //{640,480},
+    /*{720,540},{800,600},/*{1280,720},{1280,960},{1920,1080},{2048,1536},{2560,1440},{2592,1944},{2592,1456},*/
+    {0,0}
+};
 
-static uint Camera_Resolution[][2] = {{176,144},{320,240},{352,288},
-                     {640,480},/*{720,540},{800,600},/*{1280,720},{1280,960},{1920,1080},{2048,1536},{2560,1440},{2592,1944},{2592,1456},*/
-                     {0,0}};
+static uint Camera_Resolution[][2] =
+{
+    {176,144},
+    {320,240},
+    {352,288},
+    {640,480},
+    //{960, 480},
+    //{960, 576},
+    //{720,540},
+    //{800,600},/*{1280,720},{1280,960},{1920,1080},{2048,1536},{2560,1440},{2592,1944},{2592,1456},*/
+    {0,0}
+};
 
 constexpr int MAX_RETRY = 5;                  // Allow retry v4l2 open failures a few times.
 constexpr int OPEN_RETRY_SLEEP_US = 100000;  // 100ms * MAX_RETRY = 0.5 seconds
@@ -709,7 +733,7 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
     }
 
     if (hasDepth) {
-        status_t ret = initOutputCharsKeysByFormat(
+        status_t ret = initOutputCharsKeysByFormat(fd,
                 metadata, V4L2_PIX_FMT_Z16, halDepthFormats,
                 ANDROID_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS,
@@ -723,7 +747,7 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
     }
     if (hasColor) {
         status_t ret =
-                initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_MJPEG, halFormats,
+                initOutputCharsKeysByFormat(fd, metadata, V4L2_PIX_FMT_MJPEG, halFormats,
                                             ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                                             ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                                             ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
@@ -734,19 +758,19 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
             return ret;
         }
     } else if (hasColor_yuv) {
-        initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_YUYV, halFormats,
+        initOutputCharsKeysByFormat(fd, metadata, V4L2_PIX_FMT_YUYV, halFormats,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                 ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
                 ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
     } else if (hasColor_nv12) {
-        initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_NV12, halFormats,
+        initOutputCharsKeysByFormat(fd, metadata, V4L2_PIX_FMT_NV12, halFormats,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                 ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
                 ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
     } else if (hasColor_h264) {
-        initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_H264, halFormats,
+        initOutputCharsKeysByFormat(fd, metadata, V4L2_PIX_FMT_H264, halFormats,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                 ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                 ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
@@ -781,7 +805,7 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
 
 template <size_t SIZE>
 status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
-        ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata,
+        int fd, ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata,
         uint32_t fourcc, const std::array<int, SIZE>& halFormats, int streamConfigTag,
         int streamConfigurationKey, int minFrameDurationKey, int stallDurationKey) {
     if (mSupportedFormats.empty()) {
@@ -793,37 +817,79 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
     for (const auto& supportedFormat : mSupportedFormats)
         supportedFormatsAdd.push_back(supportedFormat);
 
-    int i=0,j=0;
-	int element_count=0;
-	while(Camera_Resolution[i][0]>0 && Camera_Resolution[i][1]>0){
-		element_count++;
-		i++;
-	}
-
-    for (i = 0; i < element_count; i++) {
-        int nearbyIndex = -1;int offset = INT_MAX;
-        for (j = 0; j < mSupportedFormats.size(); j++) {
-            if (mSupportedFormats[j].fourcc != fourcc) continue;
-            int w = Camera_Resolution[i][0];
-            int h = Camera_Resolution[i][1];
-            if (mSupportedFormats[j].width == w && mSupportedFormats[j].height == h) break;
-            int value = mSupportedFormats[j].width*mSupportedFormats[j].height - w*h;
-            int curoffset = std::abs(value);
-            if (curoffset < offset) {
-                nearbyIndex = j;
-                offset = curoffset;
-            }
+    // VIDIOC_QUERYCAP get Capability
+     struct v4l2_capability capability;
+    int ret_query = ioctl(fd, VIDIOC_QUERYCAP, &capability);
+    if (ret_query < 0) {
+        ALOGE("%s v4l2 QUERYCAP %s failed: %s", __FUNCTION__, strerror(errno));
+    }
+    if (capability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) {
+        int i=0,j=0;
+        int element_count=0;
+        while(Camera_Resolution_Vehicle[i][0]>0 && Camera_Resolution_Vehicle[i][1]>0){
+            element_count++;
+            i++;
         }
 
-        if (j == mSupportedFormats.size()) {// this preview size not support,add to support lists.
-            SupportedV4L2Format format {
-                            .width = static_cast<int32_t>(Camera_Resolution[i][0]),
-                            .height = static_cast<int32_t>(Camera_Resolution[i][1]),
-                            .fourcc = mSupportedFormats[nearbyIndex].fourcc,
-                            .frameRates = mSupportedFormats[nearbyIndex].frameRates
-                        };
-            ALOGD("add self preview size:%dx%d", format.width, format.height);
-            supportedFormatsAdd.push_back(format);
+        for (i = 0; i < element_count; i++) {
+            int nearbyIndex = -1;int offset = INT_MAX;
+            for (j = 0; j < mSupportedFormats.size(); j++) {
+                if (mSupportedFormats[j].fourcc != fourcc) continue;
+                int w = Camera_Resolution_Vehicle[i][0];
+                int h = Camera_Resolution_Vehicle[i][1];
+                if (mSupportedFormats[j].width == w && mSupportedFormats[j].height == h) break;
+                int value = mSupportedFormats[j].width*mSupportedFormats[j].height - w*h;
+                int curoffset = std::abs(value);
+                if (curoffset < offset) {
+                    nearbyIndex = j;
+                    offset = curoffset;
+                }
+            }
+
+            if (j == mSupportedFormats.size()) {// this preview size not support,add to support lists.
+                SupportedV4L2Format format {
+                                .width = static_cast<int32_t>(Camera_Resolution_Vehicle[i][0]),
+                                .height = static_cast<int32_t>(Camera_Resolution_Vehicle[i][1]),
+                                .fourcc = mSupportedFormats[nearbyIndex].fourcc,
+                                .frameRates = mSupportedFormats[nearbyIndex].frameRates
+                            };
+                ALOGD("add self preview size:%dx%d", format.width, format.height);
+                supportedFormatsAdd.push_back(format);
+            }
+        }
+    } else {
+        int i=0,j=0;
+        int element_count=0;
+        while(Camera_Resolution_Vehicle[i][0]>0 && Camera_Resolution[i][1]>0){
+            element_count++;
+            i++;
+        }
+
+        for (i = 0; i < element_count; i++) {
+            int nearbyIndex = -1;int offset = INT_MAX;
+            for (j = 0; j < mSupportedFormats.size(); j++) {
+                if (mSupportedFormats[j].fourcc != fourcc) continue;
+                int w = Camera_Resolution[i][0];
+                int h = Camera_Resolution[i][1];
+                if (mSupportedFormats[j].width == w && mSupportedFormats[j].height == h) break;
+                int value = mSupportedFormats[j].width*mSupportedFormats[j].height - w*h;
+                int curoffset = std::abs(value);
+                if (curoffset < offset) {
+                    nearbyIndex = j;
+                    offset = curoffset;
+                }
+            }
+
+            if (j == mSupportedFormats.size()) {// this preview size not support,add to support lists.
+                SupportedV4L2Format format {
+                                .width = static_cast<int32_t>(Camera_Resolution[i][0]),
+                                .height = static_cast<int32_t>(Camera_Resolution[i][1]),
+                                .fourcc = mSupportedFormats[nearbyIndex].fourcc,
+                                .frameRates = mSupportedFormats[nearbyIndex].frameRates
+                            };
+                ALOGD("add self preview size:%dx%d", format.width, format.height);
+                supportedFormatsAdd.push_back(format);
+            }
         }
     }
     trimSupportedFormats(mCroppingType, &supportedFormatsAdd);
