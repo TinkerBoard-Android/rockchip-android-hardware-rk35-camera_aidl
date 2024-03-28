@@ -69,6 +69,11 @@
 #include <hardware/gralloc1.h>
 #define RK_GRALLOC_USAGE_RANGE_FULL GRALLOC1_CONSUMER_USAGE_PRIVATE_17
 
+#include <cutils/properties.h>
+#include "iep2_api.h"
+
+#define ALIGN(b,w) (((b)+((w)-1))/(w)*(w))
+
 #define MPP_ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
 
 //#define DUMP_YUV
@@ -270,7 +275,7 @@ static bool checkH264FrameType(const uint8_t *pInBuffer, size_t inputLen,size_t 
 	}
 }
 
-extern "C" void debugShowFPS(std::string cameraId) {
+extern "C" void debugShowFPS(std::string cameraId,int fmt,int w,int h) {
     int mapId = std::stoi(cameraId.c_str());
     mapFrameCount[mapId]++;
     if (!(mapFrameCount[mapId] & 0x1F)) {
@@ -279,7 +284,7 @@ extern "C" void debugShowFPS(std::string cameraId) {
         mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
         mapLastFpsTime[mapId] = now;
         mapLastFrameCount[mapId] = mapFrameCount[mapId];
-        ALOGD("CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
+        ALOGD("CameraID=%s, %d Frames, %2.3f FPS, fmt=0x%x w=%d h=%d",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId],fmt,w,h);
     }
 }
 
@@ -344,16 +349,36 @@ void ExternalCameraDeviceSession::createPreviewBuffer(){
     int tempHeight = (mV4l2StreamingFmt.height + 15) & (~15);
     RockchipRga& rkRga(RockchipRga::get());
     int src_fd;
+    int ret;
 
-    for(int i = 0; i< mCfg.numVideoBuffers; i++){
+    mFormatConvertThread->mMapGraphicBuffer.clear();
+
+    for(int i = 0; i< mCfg.numVideoBuffers; i++) {
         mFormatConvertThread->mMapGraphicBuffer[i] = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
         sp<GraphicBuffer> buffer = mFormatConvertThread->mMapGraphicBuffer[i];
         buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&mFormatConvertThread->mVirAddrs[i]);
         buffer->unlock();
-        int ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
+        ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
         mFormatConvertThread->mShareFds[i] = src_fd;
         ALOGD("alloc buffer %d W:H=%dx%d, fd:0x%x.", i, tempWidth, tempHeight, src_fd);
     }
+
+    /* V4L2_FIELD_INTERLACED case */
+    if ((tempHeight == 576 || tempHeight == 480) &&
+        (mV4l2StreamingFmt.fourcc == V4L2_PIX_FMT_NV12) &&
+        mFormatConvertThread->mIepReady) {
+        for(int i = 0; i< 4; i++) {
+            mFormatConvertThread->mMapGraphicBuffer[mCfg.numVideoBuffers+i] = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
+            sp<GraphicBuffer> buffer = mFormatConvertThread->mMapGraphicBuffer[mCfg.numVideoBuffers+i];
+            buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&mFormatConvertThread->mIepShareFd[i]);
+            buffer->unlock();
+            ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
+            mFormatConvertThread->mIepShareFd[i]  = src_fd;
+
+            ALOGD("alloc Temp iep buffer %d W:H=%dx%d, fd:0x%x.", i, tempWidth, tempHeight, src_fd);
+        }
+    }
+
 }
 
 Size ExternalCameraDeviceSession::getMaxThumbResolution() const {
@@ -695,6 +720,19 @@ ScopedAStatus ExternalCameraDeviceSession::configureStreams(
         return fromStatus(Status::INTERNAL_ERROR);
     }
 
+    if (mFormatConvertThread->mRkiep  == nullptr) {
+        mFormatConvertThread->mRkiep  = new rkiep();
+        mFormatConvertThread->mIepReady = false;
+    }
+
+    int ret = mFormatConvertThread->mRkiep->iep2_init(ALIGN(v4l2Fmt.width, 64), v4l2Fmt.height, IEP2_FMT_YUV420);
+    if (ret) {
+        ALOGE("iep init failed!");
+        mFormatConvertThread->mIepReady = false;
+    } else {
+        ALOGD("iep init ok!");
+        mFormatConvertThread->mIepReady = true;
+    }
     createPreviewBuffer();
 
     Size v4lSize = {v4l2Fmt.width, v4l2Fmt.height};
@@ -2024,6 +2062,11 @@ int ExternalCameraDeviceSession::v4l2StreamOffLocked() {
     }
 
     mV4l2Streaming = false;
+    if (mFormatConvertThread != nullptr) {
+        if (mFormatConvertThread->mRkiep != nullptr) {
+            mFormatConvertThread->mRkiep->iep2_deinit();
+        }
+    }
     return OK;
 }
 
@@ -2680,10 +2723,14 @@ ExternalCameraDeviceSession::FormatConvertThread::FormatConvertThread(
     std::weak_ptr<OutputThreadInterface> parent,
         std::shared_ptr<OutputThread> outputThread):mParent(parent) {
     mFmtOutputThread = outputThread;
+    mRkiep = nullptr;
 }
 
 ExternalCameraDeviceSession::FormatConvertThread::~FormatConvertThread() {
-
+    if (mRkiep!=nullptr) {
+        delete mRkiep;
+        mRkiep = nullptr;
+    }
 }
 
 void ExternalCameraDeviceSession::FormatConvertThread::createJpegDecoder(){
@@ -3034,7 +3081,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
          return true;
     }
 
-    debugShowFPS(req->cameraId);
+    //debugShowFPS(req->cameraId);
     // ALOGD("@%s(%d) proc frameNumber:%d, index:%d",__PRETTY_FUNCTION__,__LINE__,req->frameNumber,req->index);
     bool hasBlobOrYv12 = false;
 
@@ -3056,6 +3103,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
 
     int tmpW = (req->frameIn->mWidth + 15) & (~15);
     int tmpH = (req->frameIn->mHeight + 15) & (~15);
+    debugShowFPS(req->cameraId,req->frameIn->mFourcc,tmpW,tmpH);
 
     if (req->frameIn->mFourcc == V4L2_PIX_FMT_MJPEG) {
 #ifdef RK_HW_JPEG_DECODER
@@ -3192,7 +3240,75 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
         //NV24ToNV12((unsigned char*)inData,(unsigned char*)mVirAddr,req->frameIn->mWidth,req->frameIn->mHeight);
     } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
         std::shared_ptr<V4L2Frame> v4l2Frame = std::static_pointer_cast<V4L2Frame>(req->frameIn);
-        req->mShareFd = v4l2Frame->getFd();
+        /* cvbs in case */
+        if ((tmpH == 576 || tmpH == 480)  &&
+             mIepReady) {
+            ALOGV("frameNumber(%d) mIepShareFd:0x%x!", req->frameNumber, mIepShareFd[(req->frameNumber)%3]);
+            int current,next,previous;
+            int iepDilOrder = 0;
+            camera2::RgaCropScale::rga_scale_crop(
+                tmpW, tmpH, v4l2Frame->getFd(),
+                HAL_PIXEL_FORMAT_YCrCb_NV12, mIepShareFd[(req->frameNumber)%3],
+                tmpW, tmpH, 100, false, true,
+                false, true,
+                false);
+            uint8_t  mUseIep = property_get_bool("vendor.camera.useiep", true);
+
+            if (req->frameNumber < 2 || !mUseIep) {
+                camera2::RgaCropScale::rga_scale_crop(
+                    tmpW, tmpH, v4l2Frame->getFd(),
+                    HAL_PIXEL_FORMAT_YCrCb_NV12, req->mShareFd,
+                    tmpW, tmpH, 100, false, true,
+                    false, true,
+                    false);
+            } else {
+                /* do deinterlace */
+                ALOGV("do deinterlace start!");
+                next = (req->frameNumber)%3;
+                current = (req->frameNumber -1 )%3;
+                previous = (req->frameNumber -2 )%3;
+                mRkiep->iep2_deinterlace(mIepShareFd[current], mIepShareFd[next], mIepShareFd[previous],
+                                req->mShareFd, mIepShareFd[3], &iepDilOrder);
+            }
+
+#ifdef DUMP_DEINTERLACE
+            {
+                int frameCount = req->frameNumber;
+                if(access("/data/camera",F_OK) != 0) {
+                    ALOGI("Dir /data/camera/ not exist, creat it!");
+                    mkdir("/data/camera", 0777);
+                }
+                if(frameCount > 0 && frameCount< 0) {
+                    FILE* fp =NULL;
+                    char filename[128];
+                    filename[0] = 0x00;
+                    sprintf(filename, "/data/camera/camera_ori_%dx%d_%d.yuv",
+                                tmpW, tmpH, frameCount);
+                    fp = fopen(filename, "wb+");
+                    if (fp != NULL) {
+                        fwrite((char*)req->inData,1,tmpW*tmpH*1.5,fp);
+                        fclose(fp);
+                        ALOGI("Write success YUV data to %s",filename);
+                    } else {
+                        ALOGE("Create %s failed(%d, %s)",filename,fp, strerror(errno));
+                    }
+                    sprintf(filename, "/data/camera/camera_deinterlaced_%dx%d_%d.yuv",
+                        tmpW, tmpH, frameCount);
+                    fp = fopen(filename, "wb+");
+                    if (fp != NULL) {
+                        fwrite((char*)mVirAddr,1,tmpW*tmpH*1.5,fp);
+                        fclose(fp);
+                        ALOGI("Write success YUV data to %s",filename);
+                    } else {
+                        ALOGE("Create %s failed(%d, %s)",filename,fp, strerror(errno));
+                    }
+                }
+            }
+#endif
+        } else {
+            std::shared_ptr<V4L2Frame> v4l2Frame = std::static_pointer_cast<V4L2Frame>(req->frameIn);
+            req->mShareFd = v4l2Frame->getFd();
+        }
     }
 
     mFmtOutputThread->submitRequest(req);

@@ -40,6 +40,7 @@
 #include <ui/GraphicBufferAllocator.h>
 #include "rk_mpi.h"
 #endif
+#include "rkiep.h"
 
 namespace android {
 namespace hardware {
@@ -265,6 +266,11 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
         unsigned long mShareFds[8];
         unsigned long mVirAddrs[8];
+        bool mUseIep;
+        rkiep *mRkiep;
+        bool mIepReady;
+        unsigned long mIepShareFd[4];
+        unsigned long mIepVirAddr[4];
     #endif
     private:
         const std::weak_ptr<OutputThreadInterface> mParent;
