@@ -72,6 +72,8 @@
 #include <cutils/properties.h>
 #include "iep2_api.h"
 
+#include <sys/stat.h>
+
 #define ALIGN(b,w) (((b)+((w)-1))/(w)*(w))
 
 #define MPP_ALIGN(x, a)         (((x)+(a)-1)&~((a)-1))
@@ -370,7 +372,7 @@ void ExternalCameraDeviceSession::createPreviewBuffer(){
         for(int i = 0; i< 4; i++) {
             mFormatConvertThread->mMapGraphicBuffer[mCfg.numVideoBuffers+i] = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
             sp<GraphicBuffer> buffer = mFormatConvertThread->mMapGraphicBuffer[mCfg.numVideoBuffers+i];
-            buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&mFormatConvertThread->mIepShareFd[i]);
+            buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&mFormatConvertThread->mIepVirAddr[i]);
             buffer->unlock();
             ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
             mFormatConvertThread->mIepShareFd[i]  = src_fd;
@@ -3253,6 +3255,8 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                 false, true,
                 false);
             uint8_t  mUseIep = property_get_bool("vendor.camera.useiep", true);
+            bool  dump_en = property_get_bool("vendor.usbcamerahal.dil.dumpenable", false);
+            int32_t  dump_start = property_get_int32("vendor.usbcamerahal.dil.dumpstart", 0);
 
             if (req->frameNumber < 2 || !mUseIep) {
                 camera2::RgaCropScale::rga_scale_crop(
@@ -3271,19 +3275,19 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                                 req->mShareFd, mIepShareFd[3], &iepDilOrder);
             }
 
-#ifdef DUMP_DEINTERLACE
-            {
+            if (dump_en) {
                 int frameCount = req->frameNumber;
                 if(access("/data/camera",F_OK) != 0) {
                     ALOGI("Dir /data/camera/ not exist, creat it!");
                     mkdir("/data/camera", 0777);
                 }
-                if(frameCount > 0 && frameCount< 0) {
+                if(frameCount > dump_start && frameCount< dump_start+15) {
                     FILE* fp =NULL;
                     char filename[128];
                     filename[0] = 0x00;
                     sprintf(filename, "/data/camera/camera_ori_%dx%d_%d.yuv",
                                 tmpW, tmpH, frameCount);
+                    req->frameIn->getData(&req->inData, &req->inDataSize);
                     fp = fopen(filename, "wb+");
                     if (fp != NULL) {
                         fwrite((char*)req->inData,1,tmpW*tmpH*1.5,fp);
@@ -3296,7 +3300,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                         tmpW, tmpH, frameCount);
                     fp = fopen(filename, "wb+");
                     if (fp != NULL) {
-                        fwrite((char*)mVirAddr,1,tmpW*tmpH*1.5,fp);
+                        fwrite((char*)req->mVirAddr,1,tmpW*tmpH*1.5,fp);
                         fclose(fp);
                         ALOGI("Write success YUV data to %s",filename);
                     } else {
@@ -3304,7 +3308,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                     }
                 }
             }
-#endif
+
         } else {
             std::shared_ptr<V4L2Frame> v4l2Frame = std::static_pointer_cast<V4L2Frame>(req->frameIn);
             req->mShareFd = v4l2Frame->getFd();
