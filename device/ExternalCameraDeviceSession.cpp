@@ -3272,7 +3272,7 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                 current = (req->frameNumber -1 )%3;
                 previous = (req->frameNumber -2 )%3;
                 mRkiep->iep2_deinterlace(mIepShareFd[current], mIepShareFd[next], mIepShareFd[previous],
-                                req->mShareFd, mIepShareFd[3], &iepDilOrder);
+                                mIepShareFd[3], req->mShareFd, &iepDilOrder);
             }
 
             if (dump_en) {
@@ -3301,6 +3301,16 @@ bool ExternalCameraDeviceSession::FormatConvertThread::threadLoop() {
                     fp = fopen(filename, "wb+");
                     if (fp != NULL) {
                         fwrite((char*)req->mVirAddr,1,tmpW*tmpH*1.5,fp);
+                        fclose(fp);
+                        ALOGI("Write success YUV data to %s",filename);
+                    } else {
+                        ALOGE("Create %s failed(%d, %s)",filename,fp, strerror(errno));
+                    }
+                    sprintf(filename, "/data/camera/camera_deinterlaced_notused_%dx%d_%d.yuv",
+                        tmpW, tmpH, frameCount);
+                    fp = fopen(filename, "wb+");
+                    if (fp != NULL) {
+                        fwrite((char*)mIepVirAddr[3],1,tmpW*tmpH*1.5,fp);
                         fclose(fp);
                         ALOGI("Write success YUV data to %s",filename);
                     } else {
