@@ -774,6 +774,22 @@ void CameraDeviceSession::closeImpl() {
         buffers.clear();
     }
     mCirculatingBuffers.clear();
+    for(auto [streamId,bufferMap]: mMapReqOutputBuffers){
+	for(auto [bufferId,buffer]: bufferMap){
+	    ALOGD("free output streamId:%d,bufferId:%d",streamId,bufferId);
+	    native_handle_t* nh= (native_handle_t*)(buffer);
+	    native_handle_delete(nh);
+	}
+    }
+    mMapReqOutputBuffers.clear();
+    for(auto [streamId,bufferMap]: mMapReqInputBuffers){
+	for(auto [bufferId,buffer]: bufferMap){
+	    ALOGD("free input streamId:%d,bufferId:%d",streamId,bufferId);
+	    native_handle_t* nh= (native_handle_t*)(buffer);
+	    native_handle_delete(nh);
+	}
+    }
+    mMapReqInputBuffers.clear();
 }
 
 void CameraDeviceSession::flushImpl(const std::chrono::steady_clock::time_point start) {
@@ -1349,9 +1365,8 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
         result.inputBuffer.status = (BufferStatus) hal_result->input_buffer->status;
         // skip acquire fence since it's no use to camera service
         if (hal_result->input_buffer->release_fence != -1) {
-            native_handle_t* handle = native_handle_create(/*numFds*/1, /*numInts*/0);
-            handle->data[0] = hal_result->input_buffer->release_fence;
-            result.inputBuffer.releaseFence = ::android::makeToAidl((buffer_handle_t)handle);
+            result.inputBuffer.releaseFence.fds.resize(1);
+            result.inputBuffer.releaseFence.fds.at(0).set( hal_result->input_buffer->release_fence);
         } else {
             result.inputBuffer.releaseFence = NativeHandle();
         }
@@ -1375,9 +1390,8 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
         result.outputBuffers[i].status = (BufferStatus) hal_result->output_buffers[i].status;
         // skip acquire fence since it's of no use to camera service
         if (hal_result->output_buffers[i].release_fence != -1) {
-            native_handle_t* handle = native_handle_create(/*numFds*/1, /*numInts*/0);
-            handle->data[0] = hal_result->output_buffers[i].release_fence;
-            result.outputBuffers[i].releaseFence = ::android::makeToAidl((buffer_handle_t)handle);
+            result.outputBuffers[i].releaseFence.fds.resize(1);
+            result.outputBuffers[i].releaseFence.fds.at(0).set(hal_result->output_buffers[i].release_fence);
         } else {
             result.outputBuffers[i].releaseFence = NativeHandle();
         }
@@ -1664,13 +1678,33 @@ Status CameraDeviceSession::importRequestImpl(
     std::vector<int32_t> streamIds(numBufs);
 
     for (size_t i = 0; i < numOutputBufs; i++) {
-        allBufs[i] =  ::android::makeFromAidl(request.outputBuffers[i].buffer);
+	std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqOutputBuffers[request.outputBuffers[i].streamId];
+	buffer_handle_t buf = streamBufs[request.outputBuffers[i].bufferId] ;
+	if(buf != nullptr){
+		allBufs[i]  = buf;
+		//ALOGV("cached strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+	}else{
+		ALOGD("new output strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+		allBufs[i]  = ::android::makeFromAidl(request.outputBuffers[i].buffer);
+		streamBufs[request.outputBuffers[i].bufferId]  = allBufs[i] ;
+		mMapReqOutputBuffers[request.outputBuffers[i].streamId] = streamBufs;
+	}
         allBufIds[i] = request.outputBuffers[i].bufferId;
         allBufPtrs[i] = &allBufs[i];
         streamIds[i] = request.outputBuffers[i].streamId;
     }
     if (hasInputBuf) {
-        allBufs[numOutputBufs] =  ::android::makeFromAidl(request.inputBuffer.buffer);
+	std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqInputBuffers[request.inputBuffer.streamId];
+	buffer_handle_t buf = streamBufs[request.inputBuffer.bufferId] ;
+	if(buf != nullptr){
+		allBufs[numOutputBufs]  = buf;
+		//ALOGV("cached strimeId:%d,bufId:%d",request.inputBuffer.streamId,request.inputBuffer.bufferId);
+	}else{
+		ALOGD("new input strimeId:%d,bufId:%d",request.inputBuffer.streamId,request.inputBuffer.bufferId);
+		allBufs[numOutputBufs]  = ::android::makeFromAidl(request.inputBuffer.buffer);
+		streamBufs[request.inputBuffer.bufferId]  = allBufs[numOutputBufs] ;
+		mMapReqInputBuffers[request.inputBuffer.streamId] = streamBufs;
+	}
         allBufIds[numOutputBufs] = request.inputBuffer.bufferId;
         allBufPtrs[numOutputBufs] = &allBufs[numOutputBufs];
         streamIds[numOutputBufs] = request.inputBuffer.streamId;
@@ -1690,22 +1724,26 @@ Status CameraDeviceSession::importRequestImpl(
 
     // All buffers are imported. Now validate output buffer acquire fences
     for (size_t i = 0; i < numOutputBufs; i++) {
-        if (!sHandleImporter.importFence(
-                ::android::makeFromAidl(request.outputBuffers[i].acquireFence), allFences[i])) {
+        buffer_handle_t h = ::android::makeFromAidl(request.outputBuffers[i].acquireFence);
+        if (!sHandleImporter.importFence(h, allFences[i])) {
             ALOGE("%s: output buffer %zu acquire fence is invalid", __FUNCTION__, i);
             cleanupInflightFences(allFences, i);
             return Status::INTERNAL_ERROR;
         }
+	native_handle_t* nh= (native_handle_t*)(h);
+	native_handle_delete(nh);
     }
 
     // Validate input buffer acquire fences
     if (hasInputBuf) {
-        if (!sHandleImporter.importFence(
-                ::android::makeFromAidl(request.inputBuffer.acquireFence), allFences[numOutputBufs])) {
+        buffer_handle_t h = ::android::makeFromAidl(request.inputBuffer.acquireFence);
+        if (!sHandleImporter.importFence(h, allFences[numOutputBufs])) {
             ALOGE("%s: input buffer acquire fence is invalid", __FUNCTION__);
             cleanupInflightFences(allFences, numOutputBufs);
             return Status::INTERNAL_ERROR;
         }
+	native_handle_t* nh= (native_handle_t*)(h);
+	native_handle_delete(nh);
     }
     return Status::OK;
 }

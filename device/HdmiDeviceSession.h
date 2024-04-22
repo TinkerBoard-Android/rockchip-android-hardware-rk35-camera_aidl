@@ -432,6 +432,7 @@ class HdmiDeviceSession : public BnCameraDeviceSession, public OutputThreadInter
     std::string mExifModel;
 
     bool mSupportBufMgr;
+    std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqBuffers;
     /* End of members not changed after initialize() */
 };
 
