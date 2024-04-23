@@ -240,6 +240,8 @@ private:
     std::map<std::pair<int, uint32_t>, camera3_stream_buffer_t>  mInflightBuffers;
     mutable Mutex mInflightRequestLock;
     std::map<uint32_t, HwCaptureRequest>  mInflightRequest;
+    std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqInputBuffers;
+    std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqOutputBuffers;
 
     // (frameNumber, AETriggerOverride) -> inflight request AETriggerOverrides
     std::map<uint32_t, AETriggerCancelOverride> mInflightAETriggerOverrides;

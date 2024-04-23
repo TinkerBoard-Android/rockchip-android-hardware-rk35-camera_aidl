@@ -1003,10 +1003,9 @@ Status HdmiDeviceSession::switchToOffline(
                 outputBuffer.bufferId = buffer.bufferId;
                 outputBuffer.status = BufferStatus::ERROR;
                 if (buffer.acquireFence >= 0) {
-                    native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
-                    handle->data[0] = buffer.acquireFence;
-                    outputBuffer.releaseFence = android::makeToAidl(handle);
-                }
+                    outputBuffer.releaseFence.fds.resize(1);
+                    outputBuffer.releaseFence.fds.at(0).set(buffer.acquireFence);
+		}
             } else {
                 offlineBuffers.push_back(buffer);
             }
@@ -1687,7 +1686,17 @@ Status HdmiDeviceSession::importRequestLockedImpl(
     std::vector<int32_t> streamIds(numBufs);
 
     for (size_t i = 0; i < numOutputBufs; i++) {
-        allBufs[i] = ::android::makeFromAidl(request.outputBuffers[i].buffer);
+	std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqBuffers[request.outputBuffers[i].streamId];
+	buffer_handle_t buf = streamBufs[request.outputBuffers[i].bufferId] ;
+	if(buf != nullptr){
+		allBufs[i]  = buf;
+		//ALOGV("cached strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+	}else{
+		ALOGD("new strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+		allBufs[i]  = ::android::makeFromAidl(request.outputBuffers[i].buffer);
+		streamBufs[request.outputBuffers[i].bufferId]  = allBufs[i] ;
+		mMapReqBuffers[request.outputBuffers[i].streamId] = streamBufs;
+	}
         allBufIds[i] = request.outputBuffers[i].bufferId;
         allBufPtrs[i] = &allBufs[i];
         streamIds[i] = request.outputBuffers[i].streamId;
@@ -1706,12 +1715,14 @@ Status HdmiDeviceSession::importRequestLockedImpl(
 
     // All buffers are imported. Now validate output buffer acquire fences
     for (size_t i = 0; i < numOutputBufs; i++) {
-        if (!sHandleImporter.importFence(
-                    ::android::makeFromAidl(request.outputBuffers[i].acquireFence), allFences[i])) {
+	buffer_handle_t h = ::android::makeFromAidl(request.outputBuffers[i].acquireFence);
+        if (!sHandleImporter.importFence( h , allFences[i])) {
             ALOGE("%s: output buffer %zu acquire fence is invalid", __FUNCTION__, i);
             cleanupInflightFences(allFences, i);
             return Status::INTERNAL_ERROR;
         }
+       native_handle_t* nh= (native_handle_t*)(h);
+       native_handle_delete(nh);
     }
     return Status::OK;
 }
@@ -1756,6 +1767,14 @@ void HdmiDeviceSession::close(bool callerIsDtor) {
         ALOGV("%s: closing V4L2 camera FD %d", __FUNCTION__, mV4l2Fd.get());
         mV4l2Fd.reset();
         mClosed = true;
+	for(auto [streamId,bufferMap]: mMapReqBuffers){
+		for(auto [bufferId,buffer]: bufferMap){
+			ALOGV("free streamId:%d,bufferId:%d",streamId,bufferId);
+			native_handle_t* nh= (native_handle_t*)(buffer);
+			native_handle_delete(nh);
+		}
+	}
+	mMapReqBuffers.clear();
     }
 }
 
@@ -2101,9 +2120,8 @@ Status HdmiDeviceSession::processCaptureRequestError(
         result.outputBuffers[i].bufferId = req->buffers[i].bufferId;
         result.outputBuffers[i].status = BufferStatus::ERROR;
         if (req->buffers[i].acquireFence >= 0) {
-            native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
-            handle->data[0] = req->buffers[i].acquireFence;
-            result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+            result.outputBuffers[i].releaseFence.fds.resize(1);
+            result.outputBuffers[i].releaseFence.fds.at(0).set(req->buffers[i].acquireFence);
         }
     }
 
@@ -2148,18 +2166,16 @@ Status HdmiDeviceSession::processCaptureResult(std::shared_ptr<HalRequest>& req)
         if (req->buffers[i].fenceTimeout) {
             result.outputBuffers[i].status = BufferStatus::ERROR;
             if (req->buffers[i].acquireFence >= 0) {
-                native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
-                handle->data[0] = req->buffers[i].acquireFence;
-                result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                result.outputBuffers[i].releaseFence.fds.resize(1);
+                result.outputBuffers[i].releaseFence.fds.at(0).set(req->buffers[i].acquireFence);
             }
             notifyError(req->frameNumber, req->buffers[i].streamId, ErrorCode::ERROR_BUFFER);
         } else {
             result.outputBuffers[i].status = BufferStatus::OK;
             // TODO: refactor
             if (req->buffers[i].acquireFence >= 0) {
-                native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
-                handle->data[0] = req->buffers[i].acquireFence;
-                result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                result.outputBuffers[i].releaseFence.fds.resize(1);
+                result.outputBuffers[i].releaseFence.fds.at(0).set(req->buffers[i].acquireFence);
             }
         }
     }
