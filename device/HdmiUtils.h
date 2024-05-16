@@ -228,6 +228,7 @@ struct HalRequest {
     uint8_t* inData;
     size_t inDataSize;
     std::string cameraId;
+    struct timespec reqTime;
 #endif
 };
 

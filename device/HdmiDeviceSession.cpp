@@ -101,12 +101,6 @@ constexpr int IOCTL_RETRY_SLEEP_US = 33000;  // 33ms * MAX_RETRY = 0.5 seconds
 static constexpr int kDumpLockRetries = 50;
 static constexpr int kDumpLockSleep = 60000;
 
-std::map<int, int> mapFrameCount;
-std::map<int, int> mapLastFrameCount;
-std::map<int, nsecs_t>  mapLastFpsTime;
-std::map<int, float>  mapFps;
-
-
 bool tryLock(Mutex& mutex) {
     bool locked = false;
     for (int i = 0; i < kDumpLockRetries; ++i) {
@@ -129,19 +123,6 @@ bool tryLock(std::mutex& mutex) {
         usleep(kDumpLockSleep);
     }
     return locked;
-}
-
-extern "C" void debugShowFPS(std::string cameraId) {
-    int mapId = std::stoi(cameraId.c_str());
-    mapFrameCount[mapId]++;
-    if (!(mapFrameCount[mapId] & 0x1F)) {
-        nsecs_t now = systemTime();
-        nsecs_t diff = now - mapLastFpsTime[mapId];
-        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
-        mapLastFpsTime[mapId] = now;
-        mapLastFrameCount[mapId] = mapFrameCount[mapId];
-        ALOGD("CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
-    }
 }
 
 int get_current_sourcesize(int fd,int& width,  int& height,int& pixelformat)
@@ -370,8 +351,9 @@ bool HdmiDeviceSession::initialize() {
         return true;
     }
 
-    mOutputThread->run();
+    mFrameWorkerThread->run();
     mFormatConvertThread->run();
+    mOutputThread->run();
     return false;
 }
 
@@ -394,6 +376,8 @@ void HdmiDeviceSession::initOutputThread() {
     mOutputThread = std::make_shared<OutputThread>(/*parent=*/thiz, mCroppingType,
                                                    mCameraCharacteristics, mBufferRequestThread);
     mFormatConvertThread = std::make_shared<FormatConvertThread>(thiz,mOutputThread);
+
+    mFrameWorkerThread = std::make_shared<FrameWorkerThread>(thiz,mFormatConvertThread,mCameraId);
 }
 
 void HdmiDeviceSession::closeOutputThread() {
@@ -415,6 +399,10 @@ void HdmiDeviceSession::closeOutputThreadImpl() {
     if(mFormatConvertThread != nullptr){
         mFormatConvertThread->requestExitAndWait();
         mFormatConvertThread.reset();
+    }
+    if(mFrameWorkerThread != nullptr){
+        mFrameWorkerThread->requestExitAndWait();
+        mFrameWorkerThread.reset();
     }
 }
 
@@ -845,20 +833,13 @@ Status HdmiDeviceSession::processOneCaptureRequest(const CaptureRequest& request
         return status;
     }
     std::shared_ptr<HalRequest> halReq = std::make_shared<HalRequest>();
-REDEQUE:
-    nsecs_t shutterTs = 0;
-    std::shared_ptr<V4L2Frame> frameIn = dequeueV4l2FrameLocked(&shutterTs);
-    if (frameIn == nullptr) {
-        ALOGE("%s: V4L2 deque frame failed!", __FUNCTION__);
-        return Status::INTERNAL_ERROR;
-    }
+
+
 
     halReq->cameraId = mCameraId;
     halReq->frameNumber = request.frameNumber;
     halReq->setting = mLatestReqSetting;
-    halReq->index = frameIn->mBufferIndex;
-    halReq->frameIn = std::move(frameIn);
-    halReq->shutterTs = shutterTs;
+
     halReq->buffers.resize(numOutputBufs);
     for (size_t i = 0; i < numOutputBufs; i++) {
         HalStreamBuffer& halBuf = halReq->buffers[i];
@@ -877,9 +858,8 @@ REDEQUE:
         std::lock_guard<std::mutex> lk(mInflightFramesLock);
         mInflightFrames.insert(halReq->frameNumber);
     }
-    // Send request to OutputThread for the rest of processing
-    //mOutputThread->submitRequest(halReq);
-    mFormatConvertThread->submitRequest(halReq);;
+    // Send request to FrameWorkerThread for the rest of processing
+    mFrameWorkerThread->submitRequest(halReq);
     mFirstRequest = false;
     return Status::OK;
 }
@@ -2476,7 +2456,102 @@ bool HdmiDeviceSession::BufferRequestThread::threadLoop() {
 
 // End HdmiDeviceSession::BufferRequestThread functions
 
+// Start HdmiDeviceSession::FrameWorkerThread functions
+HdmiDeviceSession::FrameWorkerThread::FrameWorkerThread(std::weak_ptr<HdmiDeviceSession> parent,
+        std::shared_ptr<FormatConvertThread> thread,std::string cameraId):mParent(parent),mFormatConvertThread(thread) ,mCameraId(cameraId) {
+
+}
+HdmiDeviceSession::FrameWorkerThread::~FrameWorkerThread() {
+}
+Status HdmiDeviceSession::FrameWorkerThread::submitRequest(
+        const std::shared_ptr<HalRequest>& req) {
+    std::unique_lock<std::mutex> lk(mRequestListLock);
+    mRequestList.push_back(req);
+    lk.unlock();
+    mRequestCond.notify_one();
+    return Status::OK;
+}
+void HdmiDeviceSession::FrameWorkerThread::waitForNextRequest(std::shared_ptr<HalRequest>* out) {
+    HAL_TRACE_FUNC_PRETTY(mCameraId);
+    ATRACE_CALL();
+    if (out == nullptr) {
+        ALOGE("%s: out is null", __FUNCTION__);
+        return;
+    }
+    std::unique_lock<std::mutex> lk(mRequestListLock);
+    int waitTimes = 0;
+    while (mRequestList.empty()) {
+        if (exitPending()) {
+            return;
+        }
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(kReqWaitTimeoutMs);
+        auto st = mRequestCond.wait_for(lk, timeout);
+        if (st == std::cv_status::timeout) {
+            waitTimes++;
+            if (waitTimes == kReqWaitTimesMax) {
+                // no new request, return
+                return;
+            }
+        }
+    }
+    *out = mRequestList.front();
+    mRequestList.pop_front();
+}
+ void HdmiDeviceSession::FrameWorkerThread::debugShowFPS(std::string cameraId) {
+    mFrameCount++;
+    if (!(mFrameCount & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mLastFpsTime;
+        mFps = ((mFrameCount - mLastFrameCount) * float(s2ns(1))) / diff;
+        mLastFpsTime = now;
+        mLastFrameCount = mFrameCount;
+        ALOGD("FrameWorkerThread CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mFrameCount, mFps);
+    }
+}
+
+bool HdmiDeviceSession::FrameWorkerThread::threadLoop() {
+    HAL_TRACE_FUNC_PRETTY(mCameraId);
+    auto parent = mParent.lock();
+    if (parent == nullptr) {
+        ALOGE("%s: session has been disconnected!", __FUNCTION__);
+        return false;
+    }
+
+    std::shared_ptr<HalRequest> req;
+
+    waitForNextRequest(&req);
+    if (req == nullptr) {
+        // No new request, wait again
+        return true;
+    }
+
+    nsecs_t shutterTs = 0;
+    std::shared_ptr<V4L2Frame> frameIn = parent->dequeueV4l2FrameLocked(&shutterTs);
+    if (frameIn == nullptr) {
+        ALOGE("%s: V4L2 deque frame failed!", __FUNCTION__);
+        return true;
+    }
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &req->reqTime );
+    debugShowFPS(req->cameraId);
+    req->index = frameIn->mBufferIndex;
+    req->frameIn = std::move(frameIn);
+    req->shutterTs = shutterTs;
+    mFormatConvertThread->submitRequest(req);
+    return true;
+}
+// End HdmiDeviceSession::FrameWorkerThread functions
 // Start HdmiDeviceSession::FormatConvertThread functions
+void HdmiDeviceSession::FormatConvertThread::debugShowFPS(std::string cameraId) {
+    mFrameCount++;
+    if (!(mFrameCount & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mLastFpsTime;
+        mFps = ((mFrameCount - mLastFrameCount) * float(s2ns(1))) / diff;
+        mLastFpsTime = now;
+        mLastFrameCount = mFrameCount;
+        ALOGD("CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mFrameCount, mFps);
+    }
+}
 
 HdmiDeviceSession::FormatConvertThread::FormatConvertThread(
     std::weak_ptr<OutputThreadInterface> parent,
@@ -2749,6 +2824,7 @@ bool HdmiDeviceSession::FormatConvertThread::threadLoop() {
         }
 #endif
     mFmtOutputThread->submitRequest(req);
+    LOG_FRAME(req->cameraId, req->frameNumber,&req->reqTime);
     return true;
 }
 // End HdmiDeviceSession::FormatConvertThread functions
@@ -3964,6 +4040,7 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
         return onDeviceError("%s: failed to process capture result!", __FUNCTION__);
     }
     signalRequestDone();
+    LOG_FRAME(req->cameraId, req->frameNumber,&req->reqTime);
     return true;
 }
 

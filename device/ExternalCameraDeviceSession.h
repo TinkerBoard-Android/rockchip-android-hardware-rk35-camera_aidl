@@ -119,6 +119,7 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
                                       std::vector<CaptureResult>* results) override;
 
     Status processCaptureResult(std::shared_ptr<HalRequest>& ptr) override;
+
     ssize_t getJpegBufferSize(int32_t width, int32_t height) const override;
 
     // Called by CameraDevice to dump active device states
@@ -184,7 +185,9 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         void flush();
         void dump(int fd);
         bool threadLoop() override;
-
+        void setCameraId(std::string cameraId){
+                mCameraId = cameraId;
+        }
         void setExifMakeModel(const std::string& make, const std::string& model);
 
         // The remaining request list is returned for offline processing
@@ -249,10 +252,12 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         std::string mExifModel;
 
         const std::shared_ptr<BufferRequestThread> mBufferRequestThread;
+        std::string mCameraId;
     };
+
     class FormatConvertThread : public SimpleThread {
     public:
-        FormatConvertThread(std::weak_ptr<OutputThreadInterface> parent,std::shared_ptr<OutputThread> outputThread);
+        FormatConvertThread(std::weak_ptr<OutputThreadInterface> parent,std::shared_ptr<OutputThread> outputThread,std::string cameraId);
         ~FormatConvertThread();
         void createJpegDecoder();
         int jpegDecoder(unsigned int mShareFd, uint8_t* inData, size_t inDataSize);
@@ -262,6 +267,7 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         void destroyH264Decoder();
         Status submitRequest(const std::shared_ptr<HalRequest>&);
         bool threadLoop() override;
+        void debugShowFPS(std::string cameraId,int fmt,int w,int h);
     #ifdef RK_DEVICE
         std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
         unsigned long mShareFds[8];
@@ -307,8 +313,42 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
         std::list<std::shared_ptr<HalRequest>> mRequestList;
         static const int kReqWaitTimeoutMs = 33;   // 33ms
         static const int kReqWaitTimesMax = 90;    // 33ms * 90 ~= 3 sec
+        std::string mCameraId;
+        int mFrameCount;
+        int mLastFrameCount;
+        nsecs_t  mLastFpsTime;
+        float  mFps;
     };
 
+    class FrameWorkerThread : public SimpleThread {
+    public:
+        FrameWorkerThread(std::weak_ptr<ExternalCameraDeviceSession> parent,std::shared_ptr<FormatConvertThread> thread,std::string cameraId);
+        ~FrameWorkerThread();
+        Status submitRequest(const std::shared_ptr<HalRequest>&);
+        bool threadLoop() override;
+        void debugShowFPS(std::string cameraId);
+    private:
+        void waitForNextRequest(std::shared_ptr<HalRequest>* out);
+        const std::weak_ptr<ExternalCameraDeviceSession> mParent;
+        std::shared_ptr<FormatConvertThread> mFormatConvertThread;
+        mutable std::mutex mRequestListLock;      // Protect acccess to mRequestList,
+                                                  // mProcessingRequest and mProcessingFrameNumer
+        std::condition_variable mRequestCond;     // signaled when a new request is submitted
+        std::list<std::shared_ptr<HalRequest>> mRequestList;
+        static const int kReqWaitTimeoutMs = 33;   // 33ms
+        static const int kReqWaitTimesMax = 90;    // 33ms * 90 ~= 3 sec
+        std::string mCameraId;
+        int mFrameCount;
+        int mLastFrameCount;
+        nsecs_t  mLastFpsTime;
+        float  mFps;
+    };
+
+    std::unique_ptr<V4L2Frame> dequeueV4l2FrameLocked(
+            /*out*/ nsecs_t* shutterTs);  // Called with mLock held
+
+    void enqueueV4l2Frame(const std::shared_ptr<V4L2Frame>&);
+    bool isNeedCheckIFrame = true;
   private:
     bool initialize();
     // To init/close different version of output thread
@@ -325,11 +365,6 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
     int v4l2StreamOffLocked();
 
     int setV4l2FpsLocked(double fps);
-
-    std::unique_ptr<V4L2Frame> dequeueV4l2FrameLocked(
-            /*out*/ nsecs_t* shutterTs);  // Called with mLock held
-
-    void enqueueV4l2Frame(const std::shared_ptr<V4L2Frame>&);
 
     // Check if input Stream is one of supported stream setting on this device
     static bool isSupported(const Stream& stream,
@@ -408,8 +443,6 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
     bool mFirstRequest = false;
     common::V1_0::helper::CameraMetadata mLatestReqSetting;
 
-    bool isNeedCheckIFrame = true;
-
     bool mV4l2Streaming = false;
     SupportedV4L2Format mV4l2StreamingFmt;
     double mV4l2StreamingFps = 0.0;
@@ -428,6 +461,8 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
     std::shared_ptr<OutputThread> mOutputThread;
 
     std::shared_ptr<FormatConvertThread> mFormatConvertThread;
+
+    std::shared_ptr<FrameWorkerThread> mFrameWorkerThread;
 
     // Stream ID -> Stream cache
     std::unordered_map<int, Stream> mStreamMap;
@@ -472,6 +507,9 @@ class ExternalCameraDeviceSession : public BnCameraDeviceSession, public OutputT
     bool mSupportBufMgr;
 
     std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqBuffers;
+
+    struct timespec mLastProcTime;
+
     /* End of members not changed after initialize() */
 };
 

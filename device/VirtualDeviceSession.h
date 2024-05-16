@@ -188,7 +188,7 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
 
         // The remaining request list is returned for offline processing
         std::list<std::shared_ptr<HalRequest>> switchToOffline();
-
+        void debugShowFPS(std::string cameraId);
       protected:
         static const int kFlushWaitTimeoutSec = 3;  // 3 sec
         static const int kReqWaitTimeoutMs = 33;    // 33ms
@@ -247,6 +247,10 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
         std::string mExifModel;
 
         const std::shared_ptr<BufferRequestThread> mBufferRequestThread;
+        std::map<int, int> mapFrameCount;
+        std::map<int, int> mapLastFrameCount;
+        std::map<int, nsecs_t>  mapLastFpsTime;
+        std::map<int, float>  mapFps;
     };
     class FormatConvertThread : public SimpleThread {
     public:
@@ -257,6 +261,7 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
     #ifdef RK_DEVICE
             std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
     #endif
+        void debugShowFPS(std::string cameraId);
     private:
         const std::weak_ptr<OutputThreadInterface> mParent;
         void yuyvToNv12(int v4l2_fmt_dst, char *srcbuf, char *dstbuf,
@@ -270,8 +275,37 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
         std::list<std::shared_ptr<HalRequest>> mRequestList;
         static const int kReqWaitTimeoutMs = 33;   // 33ms
         static const int kReqWaitTimesMax = 90;    // 33ms * 90 ~= 3 sec
+        std::map<int, int> mapFrameCount;
+        std::map<int, int> mapLastFrameCount;
+        std::map<int, nsecs_t>  mapLastFpsTime;
+        std::map<int, float>  mapFps;
     };
-
+    class FrameWorkerThread : public SimpleThread {
+    public:
+        FrameWorkerThread(std::weak_ptr<VirtualDeviceSession> parent,std::shared_ptr<FormatConvertThread> thread,std::string cameraId);
+        ~FrameWorkerThread();
+        Status submitRequest(const std::shared_ptr<HalRequest>&);
+        bool threadLoop() override;
+    #ifdef RK_DEVICE
+            std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
+    #endif
+        void debugShowFPS(std::string cameraId);
+    private:
+        void waitForNextRequest(std::shared_ptr<HalRequest>* out);
+        const std::weak_ptr<VirtualDeviceSession> mParent;
+        std::shared_ptr<FormatConvertThread> mFormatConvertThread;
+        mutable std::mutex mRequestListLock;      // Protect acccess to mRequestList,
+                                                  // mProcessingRequest and mProcessingFrameNumer
+        std::condition_variable mRequestCond;     // signaled when a new request is submitted
+        std::list<std::shared_ptr<HalRequest>> mRequestList;
+        static const int kReqWaitTimeoutMs = 33;   // 33ms
+        static const int kReqWaitTimesMax = 90;    // 33ms * 90 ~= 3 sec
+        std::string mCameraId;
+        std::map<int, int> mapFrameCount;
+        std::map<int, int> mapLastFrameCount;
+        std::map<int, nsecs_t>  mapLastFpsTime;
+        std::map<int, float>  mapFps;
+    };
   private:
     bool initialize();
     // To init/close different version of output thread
@@ -291,7 +325,11 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
 
     std::unique_ptr<V4L2Frame> dequeueV4l2FrameLocked(
             /*out*/ nsecs_t* shutterTs);  // Called with mLock held
-
+    void debugShowFPS(std::string cameraId);
+        std::map<int, int> mapFrameCount;
+        std::map<int, int> mapLastFrameCount;
+        std::map<int, nsecs_t>  mapLastFpsTime;
+        std::map<int, float>  mapFps;
     void enqueueV4l2Frame(const std::shared_ptr<V4L2Frame>&);
 
     // Check if input Stream is one of supported stream setting on this device
@@ -391,6 +429,8 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
 
     std::shared_ptr<FormatConvertThread> mFormatConvertThread;
 
+    std::shared_ptr<FrameWorkerThread> mFrameWorkerThread;
+
     // Stream ID -> Stream cache
     std::unordered_map<int, Stream> mStreamMap;
 
@@ -433,6 +473,8 @@ class VirtualDeviceSession : public BnCameraDeviceSession, public OutputThreadIn
 
     bool mSupportBufMgr;
     std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqBuffers;
+
+    long Number;
     /* End of members not changed after initialize() */
 };
 

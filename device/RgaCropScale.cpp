@@ -20,6 +20,9 @@
 #include <im2d_api/im2d.h>
 #include "im2d_api/im2d.hpp"
 #include "im2d_api/im2d_common.h"
+#include "log.h"
+
+#define LOG_TAG "RgaCropScale"
 
 namespace android {
 namespace camera2 {
@@ -39,6 +42,7 @@ namespace camera2 {
 
 int RgaCropScale::CropScaleNV12Or21(struct Params* in, struct Params* out)
 {
+    HAL_TRACE_CALL();
     rga_info_t src, dst;
     rga_buffer_handle_t src_handle;
     rga_buffer_handle_t dst_handle;
@@ -74,11 +78,11 @@ int RgaCropScale::CropScaleNV12Or21(struct Params* in, struct Params* out)
         src.fd = -1;
         src.virAddr = (void*)in->vir_addr;
         src_handle = importbuffer_virtualaddr(src.virAddr, &param);
-        ALOGD("@%s,src virtual:%p,width:%d,height:%d",__FUNCTION__,src.virAddr,param.width,param.height);
+        LOGD("@%s,src virtual:%p,width:%d,height:%d",__FUNCTION__,src.virAddr,param.width,param.height);
     } else {
         src.fd = in->fd;
         src_handle = importbuffer_fd(src.fd, &param);
-        ALOGD("@%s, src fd:%d,width:%d,height:%d",__FUNCTION__,src.fd,param.width,param.height);
+        LOGD("@%s, src fd:%d,width:%d,height:%d",__FUNCTION__,src.fd,param.width,param.height);
     }
     src.mmuFlag = ((2 & 0x3) << 4) | 1 | (1 << 8) | (1 << 10);
 
@@ -139,6 +143,7 @@ int RgaCropScale::rga_scale_crop(
 		int zoom_val, bool mirror, bool isNeedCrop,
 		bool isDstNV21, bool is16Align, bool isYuyvFormat)
 {
+    HAL_TRACE_CALL();
     int ret = 0;
     rga_info_t src,dst;
     int zoom_cropW,zoom_cropH;
@@ -251,6 +256,7 @@ int RgaCropScale::rga_scale_crop_use_handle(
         int zoom_val, bool mirror, bool isNeedCrop,
         bool isDstNV21, bool is16Align, bool isYuyvFormat)
 {
+    HAL_TRACE_CALL();
     int ret = 0;
     rga_info_t src,dst;
     int zoom_cropW,zoom_cropH;
@@ -362,6 +368,7 @@ static void empty_structure(rga_buffer_t *src, rga_buffer_t *dst, rga_buffer_t *
 
 int RgaCropScale::Im2dBlit(struct Params* in, struct Params* out)
 {
+    HAL_TRACE_CALL();
 	im_rect         src_rect;
 	im_rect         dst_rect;
 	rga_buffer_t     src;
