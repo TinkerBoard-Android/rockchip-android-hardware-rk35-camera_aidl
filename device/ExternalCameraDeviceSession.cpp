@@ -294,16 +294,26 @@ const int ExternalCameraDeviceSession::kMaxStallStream;
 HandleImporter ExternalCameraDeviceSession::sHandleImporter;
 
 sp<GraphicBuffer> GraphicBuffer_Init(int width, int height,int format) {
-    sp<GraphicBuffer> gb(new GraphicBuffer(width,height,format,
-                                           GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                           RK_GRALLOC_USAGE_RGA_ACCESS |
-                                           RK_GRALLOC_USAGE_SPECIFY_STRIDE |
-                                           GRALLOC_USAGE_SW_READ_OFTEN));
+    uint64_t usage = GRALLOC_USAGE_SW_WRITE_OFTEN |
+                     RK_GRALLOC_USAGE_RGA_ACCESS |
+                     RK_GRALLOC_USAGE_SPECIFY_STRIDE |
+                     GRALLOC_USAGE_SW_READ_OFTEN;
+
+    sp<GraphicBuffer> gb(new GraphicBuffer(width,height,format,0, usage));
     if (gb->initCheck()) {
-        printf("GraphicBuffer check error : %s\n",strerror(errno));
-        return NULL;
-    } else
-        printf("GraphicBuffer check %s \n","ok");
+        /*
+         * The lower version of gralloc (gralloc-0.3) does not support 64-bit usage,
+         * so it needs to be truncated externally to 32-bit. And don't need 4G usage.
+         */
+        ALOGD("graphicbuffer re-alloc 32-bit usage\n");
+        gb = sp<GraphicBuffer>(new GraphicBuffer(width, height, format, (int)usage));
+        if (gb->initCheck()) {
+            ALOGD("GraphicBuffer check error : %s\n",strerror(errno));
+            return NULL;
+        }
+    } else {
+        ALOGD("GraphicBuffer check %s \n","ok");
+    }
 
     return gb;
 }
