@@ -372,7 +372,9 @@ bool HdmiProvider::HotplugThread::initialize() {
 bool HdmiProvider::HotplugThread::threadLoop() {
     // Initialize inotify descriptors if needed.
     if (!mIsInitialized && !initialize()) {
-        return true;
+        close(mPipeFd[0]);
+        close(mPipeFd[1]);
+        return false;
     }
 
     struct pollfd fds[2];
