@@ -261,6 +261,8 @@ class HdmiDeviceSession : public BnCameraDeviceSession, public OutputThreadInter
         void debugShowFPS(std::string cameraId);
     #ifdef RK_DEVICE
             std::unordered_map<int, sp<GraphicBuffer>> mMapGraphicBuffer;
+            std::unordered_map<int, int> mMapGraphicBufferFd;
+            std::unordered_map<int, uint32_t> mMapGraphicBufferRgaHandle;
     #endif
     private:
         const std::weak_ptr<OutputThreadInterface> mParent;
@@ -407,6 +409,8 @@ class HdmiDeviceSession : public BnCameraDeviceSession, public OutputThreadInter
     size_t mV4L2BufferCount = 0;
     struct v4l2_plane mPlanes[1];
     struct v4l2_capability mCapability;
+    std::unordered_map<int, int> mExportFdMap;
+    std::unordered_map<int, int> mExportHandleMap;
 
     static const int kBufferWaitTimeoutSec = 3;  // TODO: handle long exposure (or not allowing)
     std::mutex mV4l2BufferLock;                  // protect the buffer count and condition below
@@ -463,6 +467,7 @@ class HdmiDeviceSession : public BnCameraDeviceSession, public OutputThreadInter
 
     bool mSupportBufMgr;
     std::unordered_map<int,std::unordered_map<int,buffer_handle_t>> mMapReqBuffers;
+    std::unordered_map<int,std::unordered_map<int,int>> mMapReqBuffersRgaHandler;
     /* End of members not changed after initialize() */
 };
 

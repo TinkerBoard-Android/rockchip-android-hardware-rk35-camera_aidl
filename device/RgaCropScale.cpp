@@ -443,5 +443,97 @@ int RgaCropScale::Im2dBlit(struct Params* in, struct Params* out)
 	return ret;
 }
 
+int RgaCropScale::CropScaleNV12Or21Async(struct Params* in, struct Params* out)
+{
+   // HAL_TRACE_CALL(CAM_GLBL_DBG_HIGH);
+	pthread_t asyncThread;
+	im_rect         src_rect;
+	im_rect         dst_rect;
+	rga_buffer_t     src;
+	rga_buffer_t     dst;
+	int ret = 0;
+	memset(&src_rect, 0, sizeof(src_rect));
+	memset(&dst_rect, 0, sizeof(dst_rect));
+	memset(&src, 0, sizeof(src));
+	memset(&dst, 0, sizeof(dst));
+	out->release_fence_fd = -1;
+	im_handle_param_t param_in,param_out;
+
+	rga_buffer_handle_t src_handle;
+    rga_buffer_handle_t dst_handle;
+	param_in.width = in->width_stride;
+	param_in.height = in->height_stride;
+	param_in.format = in->fmt;
+
+	param_out.width = out->width;
+	param_out.height = out->height;
+	param_out.format = out->fmt;
+    if (in->handle != -1)
+    {
+       src_handle = in->handle;
+    } else if (in->fd == -1) {
+	   src_handle = importbuffer_virtualaddr((void*)in->vir_addr, &param_in);
+	} else {
+	   src_handle = importbuffer_fd(in->fd, &param_in);
+	}
+
+	if (out->handle != -1)
+    {
+       dst_handle = out->handle;
+    } else if (out->fd == -1) {
+	   dst_handle = importbuffer_virtualaddr((void*)out->vir_addr, &param_out);
+	} else {
+	   dst_handle = importbuffer_fd(out->fd, &param_out);
+	}
+
+	src = wrapbuffer_handle(src_handle, in->width_stride, in->height_stride, in->fmt);
+	dst = wrapbuffer_handle(dst_handle, out->width, out->height, out->fmt);
+
+	if(src.width == 0 || dst.width == 0)
+    {
+        if (in->handle == -1){
+            releasebuffer_handle(src_handle);
+        }
+        if (out->handle == -1){
+            releasebuffer_handle(dst_handle);
+        }
+		return -1;
+	}
+
+	im_opt_t opt;
+	rga_buffer_t pat;
+	im_rect srect;
+	im_rect drect;
+	im_rect prect;
+	int usage = 0;
+    srect.x = in->offset_x;
+    srect.y = 0;
+    srect.width = in->width;
+    srect.height = in->height;
+	usage |= IM_ASYNC;
+	ret = improcess(src, dst, {}, srect, {}, {}, in->acquire_fence_fd, &out->release_fence_fd, NULL, usage);
+    if (ret != IM_STATUS_SUCCESS) {
+        ALOGE("%s improcess failed, %s\n", LOG_TAG, imStrError((IM_STATUS)ret));
+    }
+    if (in->handle == -1){
+        releasebuffer_handle(src_handle);
+    }
+    if (out->handle == -1){
+        releasebuffer_handle(dst_handle);
+    }
+	//ALOGE("%s improcess ret = %d in.handle:%d out.handle:%d acquire_fence_fd:%d release_fence_fd:%d\n", __FUNCTION__, ret,in->handle,out->handle,in->acquire_fence_fd,out->release_fence_fd);
+
+	return ret;
+}
+
+int RgaCropScale::WaitFenceDone(int in_fence_fd){
+    int ret = 0;
+    ret = imsync(in_fence_fd);
+    if (ret != IM_STATUS_SUCCESS) {
+        ALOGE("%s imsync failed, %s\n", LOG_TAG, imStrError((IM_STATUS)ret));
+    }
+    return ret;
+}
+
 } /* namespace camera2 */
 } /* namespace android */

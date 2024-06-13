@@ -243,8 +243,11 @@ Frame::Frame(uint32_t width, uint32_t height, uint32_t fourcc)
 Frame::~Frame() {}
 
 V4L2Frame::V4L2Frame(uint32_t w, uint32_t h, uint32_t fourcc, int bufIdx, int fd, uint32_t dataSize,
-                     uint64_t offset)
-    : Frame(w, h, fourcc), mBufferIndex(bufIdx), mFd(fd), mDataSize(dataSize), mOffset(offset) {}
+                     uint64_t offset, int exportFd = -1 ,int exportHandle = -1)
+    : Frame(w, h, fourcc), mBufferIndex(bufIdx),  mFd(fd), mDataSize(dataSize), mOffset(offset) {
+        mExportHandle = exportHandle;
+        mExportFd = exportFd;
+    }
 
 V4L2Frame::~V4L2Frame() {
     unmap();
@@ -756,7 +759,6 @@ void freeReleaseFences(std::vector<CaptureResult>& results) {
         for (auto& buf : result.outputBuffers) {
             native_handle_t* outReleaseFence = ::android::makeFromAidl(buf.releaseFence);
             if (outReleaseFence != nullptr) {
-                native_handle_close(outReleaseFence);
                 native_handle_delete(outReleaseFence);
             }
         }

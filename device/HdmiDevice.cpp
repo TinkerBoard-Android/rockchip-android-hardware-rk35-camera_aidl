@@ -331,8 +331,8 @@ status_t HdmiDevice::initAvailableCapabilities(
     bool hasColor = false;
     for (const auto& fmt : mSupportedFormats) {
         switch (fmt.fourcc) {
-            case V4L2_PIX_FMT_Z16:
-                hasDepth = true;
+            case V4L2_PIX_FMT_NV16:
+                hasColor = true;
                 break;
             case V4L2_PIX_FMT_NV24:
                 hasColor = true;

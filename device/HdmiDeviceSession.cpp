@@ -163,53 +163,6 @@ void NV24ToNV12(unsigned char* tmpSrcPtr,unsigned char* tmpDstPtr, int width, in
     }
 }
 
-void convertFormat(int width,int height,int srcFormat,int dstFormat,void* srcAddr,void* dstAddr){
-    RockchipRga& rkRga(RockchipRga::get());
-    rga_buffer_handle_t src_handle;
-    rga_buffer_handle_t dst_handle;
-    im_handle_param_t param;
-    param.width = width;
-    param.height = height;
-    param.format = srcFormat;//0x7 << 8;
-
-    rga_info_t srcinfo;
-
-    src_handle = importbuffer_virtualaddr(srcAddr, &param);
-
-    srcinfo.mmuFlag = 1;
-    srcinfo.rect.xoffset = 0;
-    srcinfo.rect.yoffset = 0;
-    srcinfo.rect.width = width;
-    srcinfo.rect.height = height;
-    srcinfo.rect.wstride = width;
-    srcinfo.rect.hstride = height;
-    srcinfo.rect.format = srcFormat;//0x7 << 8;
-
-    rga_info_t dstinfo;
-
-    dstinfo.mmuFlag = 1;
-
-    param.format = dstFormat;
-
-    dst_handle = importbuffer_virtualaddr((void *)dstAddr, &param);
-    dstinfo.rect.xoffset = 0;
-    dstinfo.rect.yoffset = 0;
-    dstinfo.rect.width = width;
-    dstinfo.rect.height = height;
-    dstinfo.rect.wstride = width;
-    dstinfo.rect.hstride = height;
-    dstinfo.rect.format = dstFormat;
-
-    srcinfo.handle = src_handle;
-    srcinfo.fd = 0;
-    dstinfo.handle = dst_handle;
-    dstinfo.fd = 0;
-
-    rkRga.RkRgaBlit(&srcinfo, &dstinfo, NULL);
-
-    releasebuffer_handle(src_handle);
-    releasebuffer_handle(dst_handle);
-}
 
 }  // anonymous namespace
 
@@ -269,10 +222,29 @@ HdmiDeviceSession::HdmiDeviceSession(
 void HdmiDeviceSession::createPreviewBuffer(){
     int tempWidth = (mV4l2StreamingFmt.width + 15) & (~15);
     int tempHeight = (mV4l2StreamingFmt.height + 15) & (~15);
-
+    im_handle_param_t param;
+    param.width = tempWidth;
+    param.height = tempHeight;
+    param.format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+    RockchipRga& rkRga(RockchipRga::get());
     for(int i = 0; i< mCfg.numVideoBuffers; i ++){
-        ALOGD("alloc buffer %d W:H=%dx%d", i, tempWidth, tempHeight);
-        mFormatConvertThread->mMapGraphicBuffer[i] = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
+        int cached_handle = mFormatConvertThread->mMapGraphicBufferRgaHandle[i];
+        if (cached_handle != 0)
+        {
+            ALOGD("previewBuffer cached");
+            return;
+        }
+        sp<GraphicBuffer> buffer = GraphicBuffer_Init(tempWidth, tempHeight, HAL_PIXEL_FORMAT_YCrCb_NV12);
+        int fd = -1;
+        int ret = rkRga.RkRgaGetBufferFd(buffer->handle, &fd);
+        if (ret){
+            ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(buffer->handle));
+        }
+        int handle = importbuffer_fd(fd, &param);
+        ALOGD("alloc buffer %d W:H=%dx%d fd:%d handle:%d cached_handle:%d", i, tempWidth, tempHeight,fd,handle,cached_handle);
+        mFormatConvertThread->mMapGraphicBuffer[i] = buffer;
+        mFormatConvertThread->mMapGraphicBufferFd[i] = fd;
+        mFormatConvertThread->mMapGraphicBufferRgaHandle[i] = handle;
     }
 }
 
@@ -507,6 +479,21 @@ ScopedAStatus HdmiDeviceSession::configureStreams(
                 ++it;
             }
         }
+        for(auto [streamId,bufferMap]: mMapReqBuffersRgaHandler){
+            for(auto [bufferId,rgaHandle]: bufferMap){
+                ALOGV("release streamId:%d,bufferId:%d rga_handle:%d",streamId,bufferId,rgaHandle);
+                releasebuffer_handle(rgaHandle);
+            }
+        }
+        mMapReqBuffersRgaHandler.clear();
+        for(auto [streamId,bufferMap]: mMapReqBuffers){
+            for(auto [bufferId,buffer]: bufferMap){
+                ALOGV("free streamId:%d,bufferId:%d",streamId,bufferId);
+                native_handle_t* nh= (native_handle_t*)(buffer);
+                native_handle_delete(nh);
+            }
+        }
+        mMapReqBuffers.clear();
     }
 
     // Now select a V4L2 format to produce all output streams
@@ -539,8 +526,7 @@ ScopedAStatus HdmiDeviceSession::configureStreams(
                 // since mSupportedFormats is sorted by width then height, the first matching fmt
                 // will be the smallest one with matching aspect ratio
                 if ((fmt.fourcc == V4L2_PIX_FMT_NV24) || (fmt.fourcc == V4L2_PIX_FMT_NV16)
-				||(fmt.fourcc == V4L2_PIX_FMT_BGR24 ) || (fmt.fourcc == V4L2_PIX_FMT_NV24) ||
-                    (fmt.fourcc == V4L2_PIX_FMT_NV12) || (fmt.fourcc == V4L2_PIX_FMT_H264)) {
+				||(fmt.fourcc == V4L2_PIX_FMT_BGR24 ) || (fmt.fourcc == V4L2_PIX_FMT_NV12)) {
                     v4l2Fmt_tmp = fmt;
                     break;
                 }
@@ -853,6 +839,7 @@ Status HdmiDeviceSession::processOneCaptureRequest(const CaptureRequest& request
         halBuf.bufPtr = allBufPtrs[i];
         halBuf.acquireFence = allFences[i];
         halBuf.fenceTimeout = false;
+        halBuf.rgaHandle = mMapReqBuffersRgaHandler[streamId][halBuf.bufferId];
     }
     {
         std::lock_guard<std::mutex> lk(mInflightFramesLock);
@@ -1387,6 +1374,44 @@ int HdmiDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& v4l2Fmt,
             return -errno;
         }
         ALOGD("VIDIOC_QBUF:%d",buffer.index);
+        struct v4l2_exportbuffer expbuf;
+        memset(&expbuf, 0, sizeof(expbuf));
+        expbuf.type = buffer.type;
+        expbuf.index = i;
+        if (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+            expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        else
+            expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        expbuf.plane = 0;
+        expbuf.flags = O_CLOEXEC;
+        if (TEMP_FAILURE_RETRY(ioctl(mV4l2Fd.get(), VIDIOC_EXPBUF, &expbuf)) < 0) {
+            ALOGE("%s: VIDIOC_EXPBUF %d failed: %s", __FUNCTION__, i,  strerror(errno));
+            //return -errno;
+        } else {
+            ALOGD("get dma buf(%d)-fd: %d", i, expbuf.fd);
+        }
+        mExportFdMap[i] = expbuf.fd;
+        im_handle_param_t param;
+        param.width = v4l2Fmt.width;
+        param.height = v4l2Fmt.height;
+        if (v4l2Fmt.fourcc == V4L2_PIX_FMT_BGR24)
+        {
+            param.format = 0x7 << 8;
+        }else if (v4l2Fmt.fourcc == V4L2_PIX_FMT_NV16)
+        {
+            param.format = RK_FORMAT_YCbCr_422_SP;
+        }else if (v4l2Fmt.fourcc == V4L2_PIX_FMT_NV12)
+        {
+            param.format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+        }
+        if (param.format != 0)
+        {
+            int handle = importbuffer_fd(expbuf.fd, &param);
+            mExportHandleMap[i] = handle;
+            ALOGD("%s export buffer index:%d fd:%d handle:%d",__FUNCTION__, i, expbuf.fd, handle);
+        }else{
+            mExportHandleMap[i] = -1;
+        }
     }
 
     {
@@ -1547,7 +1572,7 @@ std::unique_ptr<V4L2Frame> HdmiDeviceSession::dequeueV4l2FrameLocked(nsecs_t* sh
     return std::make_unique<V4L2Frame>(mV4l2StreamingFmt.width, mV4l2StreamingFmt.height,
                                        mV4l2StreamingFmt.fourcc, buffer.index, mV4l2Fd.get(),
                                        (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].length : buffer.bytesused,
-                                       (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].m.mem_offset : buffer.m.offset);
+                                       (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].m.mem_offset : buffer.m.offset,mExportFdMap[buffer.index],mExportHandleMap[buffer.index]);
 }
 
 void HdmiDeviceSession::enqueueV4l2Frame(const std::shared_ptr<V4L2Frame>& frame) {
@@ -1664,26 +1689,26 @@ Status HdmiDeviceSession::importRequestLockedImpl(
     allBufPtrs.resize(numBufs);
     allFences.resize(numBufs);
     std::vector<int32_t> streamIds(numBufs);
+    Mutex::Autolock _l(mCbsLock);
 
     for (size_t i = 0; i < numOutputBufs; i++) {
-	std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqBuffers[request.outputBuffers[i].streamId];
-	buffer_handle_t buf = streamBufs[request.outputBuffers[i].bufferId] ;
-	if(buf != nullptr){
-		allBufs[i]  = buf;
-		//ALOGV("cached strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
-	}else{
-		ALOGD("new strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
-		allBufs[i]  = ::android::makeFromAidl(request.outputBuffers[i].buffer);
-		streamBufs[request.outputBuffers[i].bufferId]  = allBufs[i] ;
-		mMapReqBuffers[request.outputBuffers[i].streamId] = streamBufs;
-	}
+        std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqBuffers[request.outputBuffers[i].streamId];
+        buffer_handle_t buf = streamBufs[request.outputBuffers[i].bufferId] ;
+        if(buf != nullptr){
+            allBufs[i]  = buf;
+            //ALOGV("cached strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+        }else{
+            ALOGD("new strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+            allBufs[i]  = ::android::makeFromAidl(request.outputBuffers[i].buffer);
+            // streamBufs[request.outputBuffers[i].bufferId]  = allBufs[i] ;
+            // mMapReqBuffers[request.outputBuffers[i].streamId] = streamBufs;
+        }
         allBufIds[i] = request.outputBuffers[i].bufferId;
         allBufPtrs[i] = &allBufs[i];
         streamIds[i] = request.outputBuffers[i].streamId;
     }
 
     {
-        Mutex::Autolock _l(mCbsLock);
         for (size_t i = 0; i < numBufs; i++) {
             Status st = importBufferLocked(streamIds[i], allBufIds[i], allBufs[i], &allBufPtrs[i]);
             if (st != Status::OK) {
@@ -1692,10 +1717,41 @@ Status HdmiDeviceSession::importRequestLockedImpl(
             }
         }
     }
+    RockchipRga& rkRga(RockchipRga::get());
+    for (size_t i = 0; i < numOutputBufs; i++) {
+        std::unordered_map<int,buffer_handle_t> streamBufs =  mMapReqBuffers[request.outputBuffers[i].streamId];
+        std::unordered_map<int,int> streamBufsRgaHandle =  mMapReqBuffersRgaHandler[request.outputBuffers[i].streamId];
+        buffer_handle_t buf = streamBufs[request.outputBuffers[i].bufferId] ;
+        if(buf == nullptr){
+             const Stream& stream = mStreamMap[request.outputBuffers[i].streamId];
+            ALOGD("cache strimeId:%d,bufId:%d",request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId);
+            streamBufs[request.outputBuffers[i].bufferId]  = allBufs[i] ;
+            mMapReqBuffers[request.outputBuffers[i].streamId] = streamBufs;
+            //const native_handle_t* nh =(const native_handle_t*) allBufPtrs[i];
+
+            int fd;
+            int ret = rkRga.RkRgaGetBufferFd(*allBufPtrs[i], &fd);
+            im_handle_param_t param;
+            if (stream.format == PixelFormat::YCRCB_420_SP)
+                param.format = HAL_PIXEL_FORMAT_YCrCb_420_SP;
+             else
+                param.format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+            param.width = stream.width;
+            param.height = stream.height;
+            int handle = importbuffer_fd(fd, &param);
+            int cached_handle = streamBufsRgaHandle[request.outputBuffers[i].bufferId];
+            ALOGD("%s streamId:%d bufferId:%d buffer_fd:%d rga_handle:%d cached_handle:%d format:%d",__FUNCTION__,
+            request.outputBuffers[i].streamId,request.outputBuffers[i].bufferId,
+            fd,handle,cached_handle,stream.format);
+
+            streamBufsRgaHandle[request.outputBuffers[i].bufferId] = handle;
+            mMapReqBuffersRgaHandler[request.outputBuffers[i].streamId] = streamBufsRgaHandle;
+        }
+    }
 
     // All buffers are imported. Now validate output buffer acquire fences
     for (size_t i = 0; i < numOutputBufs; i++) {
-	buffer_handle_t h = ::android::makeFromAidl(request.outputBuffers[i].acquireFence);
+	    buffer_handle_t h = ::android::makeFromAidl(request.outputBuffers[i].acquireFence);
         if (!sHandleImporter.importFence( h , allFences[i])) {
             ALOGE("%s: output buffer %zu acquire fence is invalid", __FUNCTION__, i);
             cleanupInflightFences(allFences, i);
@@ -1747,14 +1803,21 @@ void HdmiDeviceSession::close(bool callerIsDtor) {
         ALOGV("%s: closing V4L2 camera FD %d", __FUNCTION__, mV4l2Fd.get());
         mV4l2Fd.reset();
         mClosed = true;
-	for(auto [streamId,bufferMap]: mMapReqBuffers){
-		for(auto [bufferId,buffer]: bufferMap){
-			ALOGV("free streamId:%d,bufferId:%d",streamId,bufferId);
-			native_handle_t* nh= (native_handle_t*)(buffer);
-			native_handle_delete(nh);
-		}
-	}
-	mMapReqBuffers.clear();
+        for(auto [streamId,bufferMap]: mMapReqBuffersRgaHandler){
+            for(auto [bufferId,rgaHandle]: bufferMap){
+                ALOGV("release streamId:%d,bufferId:%d rga_handle:%d",streamId,bufferId,rgaHandle);
+                releasebuffer_handle(rgaHandle);
+            }
+        }
+        mMapReqBuffersRgaHandler.clear();
+        for(auto [streamId,bufferMap]: mMapReqBuffers){
+            for(auto [bufferId,buffer]: bufferMap){
+                ALOGV("free streamId:%d,bufferId:%d",streamId,bufferId);
+                native_handle_t* nh= (native_handle_t*)(buffer);
+                native_handle_delete(nh);
+            }
+        }
+        mMapReqBuffers.clear();
     }
 }
 
@@ -1781,6 +1844,7 @@ int HdmiDeviceSession::v4l2StreamOffLocked() {
             return -1;
         }
     }
+    int exportedBufferCount = mV4L2BufferCount;
     mV4L2BufferCount = 0;
 
     // VIDIOC_STREAMOFF
@@ -1793,7 +1857,19 @@ int HdmiDeviceSession::v4l2StreamOffLocked() {
         ALOGE("%s: STREAMOFF failed: %s", __FUNCTION__, strerror(errno));
         return -errno;
     }
-
+    for (int i = 0; i < exportedBufferCount; i++) {
+        ALOGD("close mExportFdMap[%d]=%d", i, mExportFdMap[i]);
+        if (mExportFdMap[i] != -1)
+            ::close(mExportFdMap[i]);
+        {
+            mExportFdMap[i] = -1;
+        }
+        int rga_handle = mExportHandleMap[i];
+        if(rga_handle != -1){
+            releasebuffer_handle(rga_handle);
+            ALOGI("%s: release rga_handle(%d)", __FUNCTION__, rga_handle);
+        }
+    }
     // VIDIOC_REQBUFS: clear buffers
     v4l2_requestbuffers req_buffers{};
 
@@ -2560,7 +2636,13 @@ HdmiDeviceSession::FormatConvertThread::FormatConvertThread(
 }
 
 HdmiDeviceSession::FormatConvertThread::~FormatConvertThread() {
-
+    for (size_t i = 0; i < mMapGraphicBufferRgaHandle.size(); i++)
+    {
+        int rga_handle = mMapGraphicBufferRgaHandle[i];
+        releasebuffer_handle(rga_handle);
+        ALOGI("%s: release rga_handle(%d)", __FUNCTION__, rga_handle);
+    }
+    mMapGraphicBufferRgaHandle.clear();
 }
 
 Status HdmiDeviceSession::FormatConvertThread::submitRequest(
@@ -2741,15 +2823,17 @@ bool HdmiDeviceSession::FormatConvertThread::threadLoop() {
         // No new request, wait again
         return true;
     }
-
+    bool takePicture = false;
+    for (auto& halBuf : req->buffers) {
+        if(halBuf.format == PixelFormat::BLOB) {
+            ALOGD("PixelFormat::BLOB takePicture");
+            takePicture = true;
+        }
+    }
     if (req->frameIn->mFourcc != V4L2_PIX_FMT_NV24 &&
-            req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 &&
-            req->frameIn->mFourcc != V4L2_PIX_FMT_YUYV &&
             req->frameIn->mFourcc != V4L2_PIX_FMT_NV12 &&
             req->frameIn->mFourcc != V4L2_PIX_FMT_NV16 &&
-            req->frameIn->mFourcc != V4L2_PIX_FMT_NV24 &&
-            req->frameIn->mFourcc != V4L2_PIX_FMT_BGR24  &&
-            req->frameIn->mFourcc != V4L2_PIX_FMT_H264) {
+            req->frameIn->mFourcc != V4L2_PIX_FMT_BGR24) {
 
          ALOGD("do not support V4L2 format %c%c%c%c",
                 req->frameIn->mFourcc & 0xFF,
@@ -2768,40 +2852,53 @@ bool HdmiDeviceSession::FormatConvertThread::threadLoop() {
     sp<GraphicBuffer> buffer = mMapGraphicBuffer[req->index];
     buffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_SW_READ_OFTEN, (void**)&req->mVirAddr);
     buffer->unlock();
-    int src_fd,dst_fd;
-    int ret = rkRga.RkRgaGetBufferFd(buffer->handle, &src_fd);
-    if (ret){
-        ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(buffer->handle));
-        return true;
-    }
+    req->mShareFd = mMapGraphicBufferFd[req->index];
+    req->mHandle = mMapGraphicBufferRgaHandle[req->index];
 
-    req->mShareFd = src_fd;
+    camera2::RgaCropScale::Params rgain, rgaout;
 
-    //ALOGD("%s(%d)mShareFd(%d) mVirAddr(%p)!\n", __FUNCTION__, __LINE__, req->mShareFd, req->mVirAddr);
+    rgain.fd = -1;
+    rgain.handle = req->frameIn->mExportHandle;
+    //rgain.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+    rgain.vir_addr = NULL;
+    rgain.mirror = false;
+    rgain.width = req->frameIn->mWidth;
+    rgain.height = req->frameIn->mHeight;
+    rgain.offset_x = 0;
+    rgain.offset_y = 0;
+    rgain.width_stride = req->frameIn->mWidth;
+    rgain.height_stride = req->frameIn->mHeight;
 
-    int tmpW = (req->frameIn->mWidth + 15) & (~15);
-    int tmpH = (req->frameIn->mHeight + 15) & (~15);
-
+    rgaout.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+    rgaout.fd = -1;
+    rgaout.handle = req->mHandle;
+    rgaout.vir_addr = NULL;
+    rgaout.mirror = false;
+    rgaout.width = req->frameIn->mWidth;
+    rgaout.height = req->frameIn->mHeight;
+    rgaout.offset_x = 0;
+    rgaout.offset_y = 0;
+    rgaout.width_stride = req->frameIn->mWidth;
+    rgaout.height_stride = req->frameIn->mHeight;
     if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV24) {
         NV24ToNV12((unsigned char*)req->inData,(unsigned char*)req->mVirAddr,req->frameIn->mWidth,req->frameIn->mHeight);
-        // req->mShareFd = mShareFd;
-        // req->mVirAddr = mVirAddr;
-
-    } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_YUYV) {
-        //yuyvToNv12(V4L2_PIX_FMT_NV12, (char*)inData,
-        //        (char*)mVirAddr, tmpW, tmpH, tmpW, tmpH);
-        //mShareFd = mVirAddr; // YUYV:rga use vir addr
-        //req->mShareFd = reinterpret_cast<unsigned long>(inData);
-    } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
-        convertFormat(req->frameIn->mWidth,req->frameIn->mHeight,HAL_PIXEL_FORMAT_YCrCb_NV12,HAL_PIXEL_FORMAT_YCrCb_NV12,req->inData,(void *)req->mVirAddr);
-    } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_BGR24) {
-        convertFormat(req->frameIn->mWidth,req->frameIn->mHeight,0x7 << 8,HAL_PIXEL_FORMAT_YCrCb_NV12,req->inData,(void *)req->mVirAddr);
-
-    } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_NV16) {
-        //convertFormat(tmpW,tmpH,RK_FORMAT_YCbCr_422_SP,HAL_PIXEL_FORMAT_YCrCb_NV12,inData,(void *)mVirAddr);
-    } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_NV24) {
-        //NV24ToNV12((unsigned char*)inData,(unsigned char*)mVirAddr,req->frameIn->mWidth,req->frameIn->mHeight);
-
+    }else if (takePicture){
+        if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
+            rgain.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+        } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_BGR24) {
+            rgain.fmt = 0x7 << 8;
+        } else if(req->frameIn->mFourcc == V4L2_PIX_FMT_NV16) {
+            rgain.fmt = RK_FORMAT_YCbCr_422_SP;
+        }
+        if (camera2::RgaCropScale::CropScaleNV12Or21Async(&rgain, &rgaout) != IM_STATUS_SUCCESS) {
+            LOGE("%s:  crop&scale by RGA failed...", __FUNCTION__);
+            //return true;
+        }
+        if (rgaout.release_fence_fd != -1)
+        {
+            camera2::RgaCropScale::WaitFenceDone(rgaout.release_fence_fd);
+            rgaout.release_fence_fd = -1;
+        }
     }
 #ifdef DUMP_YUV
         {
@@ -3501,6 +3598,16 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
     //     return onDeviceError("%s: V4L2 buffer map failed", __FUNCTION__);
     // }
 
+    if (req->mShareFd <= 0) {
+        lk.unlock();
+        Status st = parent->processCaptureRequestError(req);
+        if (st != Status::OK) {
+            return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
+        }
+        signalRequestDone();
+        return true;
+    }
+
     int is16Align = true;
     bool isBlobOrYv12 = false;
     int tempFrameWidth  = mYu12Frame->mWidth;
@@ -3521,7 +3628,6 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
     //     }
     // }
 
-#if 1
     //wpzz add
     if (mCameraCharacteristics.exists(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)) {
         float max_digital_zoom = 1.0f;
@@ -3583,7 +3689,6 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
             isJpegNeedCropScale = true;
         }
     }
-#endif
     // Process camera mute state
     auto testPatternMode = req->setting.find(ANDROID_SENSOR_TEST_PATTERN_MODE);
     if (testPatternMode.count == 1) {
@@ -3610,7 +3715,7 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
 
     // TODO: in some special case maybe we can decode jpg directly to gralloc output?
     if (isBlobOrYv12 && req->frameIn->mFourcc == V4L2_PIX_FMT_NV24) {
-        ATRACE_BEGIN("MJPGtoI420");
+        ATRACE_BEGIN("NV12toI420");
         res = 0;
         if (mCameraMuted) {
             res = libyuv::ConvertToI420(
@@ -3788,42 +3893,6 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
         }
     }
 
-    if (isBlobOrYv12 && req->frameIn->mFourcc == V4L2_PIX_FMT_H264) {
-        ALOGV("%s NV12toI420", __FUNCTION__);
-        ATRACE_BEGIN("NV12toI420");
-        ALOGD("format is BLOB or YV12, use software NV12ToI420");
-        YCbCrLayout input;
-        input.y = (uint8_t*)req->mVirAddr;
-        input.yStride = mYu12Frame->mWidth;
-        input.cb = (uint8_t*)(req->mVirAddr) + mYu12Frame->mWidth * mYu12Frame->mHeight;
-        input.cStride = mYu12Frame->mWidth;
-
-        int res = libyuv::NV12ToI420(
-                static_cast<uint8_t*>(input.y),
-                input.yStride,
-                static_cast<uint8_t*>(input.cb),
-                input.cStride,
-                static_cast<uint8_t*>(mYu12FrameLayout.y),
-                mYu12FrameLayout.yStride,
-                static_cast<uint8_t*>(mYu12FrameLayout.cb),
-                mYu12FrameLayout.cStride,
-                static_cast<uint8_t*>(mYu12FrameLayout.cr),
-                mYu12FrameLayout.cStride,
-                mYu12Frame->mWidth, mYu12Frame->mHeight);
-       ATRACE_END();
-
-       if (res != 0) {
-            // For some webcam, the first few V4L2 frames might be malformed...
-            ALOGE("%s: Convert V4L2 frame to YU12 failed! res %d", __FUNCTION__, res);
-            lk.unlock();
-            Status st = parent->processCaptureRequestError(req);
-            if (st != Status::OK) {
-                return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
-            }
-            signalRequestDone();
-            return true;
-       }
-    }
 
     ATRACE_BEGIN("Wait for BufferRequest done");
     res = waitForBufferRequestDone(&req->buffers);
@@ -3854,7 +3923,34 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
         if (halBuf.fenceTimeout) {
             continue;
         }
+        RockchipRga& rkRga(RockchipRga::get());
+        camera2::RgaCropScale::Params rgain, rgaout;
 
+        rgain.fd = -1;
+        rgain.handle = -1;
+        rgain.vir_addr = NULL;
+        rgain.mirror = false;
+        rgain.width = tempFrameWidth;
+        rgain.height = tempFrameHeight;
+        rgain.offset_x = 0;
+        rgain.offset_y = 0;
+        rgain.width_stride = tempFrameWidth;
+        rgain.height_stride = tempFrameHeight;
+
+        if (halBuf.format == PixelFormat::YCRCB_420_SP)
+            rgaout.fmt = HAL_PIXEL_FORMAT_YCrCb_420_SP;
+        else
+            rgaout.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+        rgaout.fd = -1;
+        rgaout.handle = halBuf.rgaHandle;
+        rgaout.vir_addr = NULL;
+        rgaout.mirror = false;
+        rgaout.width = halBuf.width;
+        rgaout.height = halBuf.height;
+        rgaout.offset_x = 0;
+        rgaout.offset_y = 0;
+        rgaout.width_stride = halBuf.width;
+        rgaout.height_stride = halBuf.height;
         // Gralloc lockYCbCr the buffer
         switch (halBuf.format) {
             case PixelFormat::BLOB: {
@@ -3878,114 +3974,26 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
             } break;
             case PixelFormat::YCBCR_420_888:
             case PixelFormat::IMPLEMENTATION_DEFINED:
-#if 1
             case PixelFormat::YCRCB_420_SP: {
-                if (req->frameIn->mFourcc == V4L2_PIX_FMT_YUYV){
-                    ALOGV("%s libyuvToI420", __FUNCTION__);
-                    ATRACE_BEGIN("YUYVtoI420");
-                    int ret = libyuv::YUY2ToI420(
-                        req->inData, (mYu12Frame->mWidth)*2, static_cast<uint8_t*>(mYu12FrameLayout.y), mYu12FrameLayout.yStride,
-                        static_cast<uint8_t*>(mYu12FrameLayout.cb), mYu12FrameLayout.cStride,
-                        static_cast<uint8_t*>(mYu12FrameLayout.cr), mYu12FrameLayout.cStride,
-                        mYu12Frame->mWidth, mYu12Frame->mHeight);
-                    ATRACE_END();
-                    IMapper::Rect outRect {0, 0,
-                            static_cast<int32_t>(halBuf.width),
-                            static_cast<int32_t>(halBuf.height)};
-                    YCbCrLayout outLayout = sHandleImporter.lockYCbCr(
-                            *(halBuf.bufPtr), static_cast<uint64_t>(halBuf.usage), outRect);
-                    ALOGV("%s: outLayout y %p cb %p cr %p y_str %d c_str %d c_step %d",
-                            __FUNCTION__, outLayout.y, outLayout.cb, outLayout.cr,
-                            outLayout.yStride, outLayout.cStride, outLayout.chromaStep);
+               if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12){
+                    rgain.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                    rgain.handle = req->frameIn->mExportHandle;
 
-                    // Convert to output buffer size/format
-                    uint32_t outputFourcc = getFourCcFromLayout(outLayout);
-                    ALOGV("%s: converting to format %c%c%c%c", __FUNCTION__,
-                            outputFourcc & 0xFF,
-                            (outputFourcc >> 8) & 0xFF,
-                            (outputFourcc >> 16) & 0xFF,
-                            (outputFourcc >> 24) & 0xFF);
-
-                    YCbCrLayout cropAndScaled;
-                    ATRACE_BEGIN("cropAndScaleLocked");
-                    ret = cropAndScaleLocked(
-                            mYu12Frame,
-                            Size { halBuf.width, halBuf.height },
-                            &cropAndScaled);
-                    ATRACE_END();
-                    if (ret != 0) {
-                        lk.unlock();
-                        return onDeviceError("%s: crop and scale failed!", __FUNCTION__);
-                    }
-                    Size sz {halBuf.width, halBuf.height};
-                    ATRACE_BEGIN("formatConvert");
-                    ret = formatConvert(cropAndScaled, outLayout, sz, outputFourcc);
-                    ATRACE_END();
-                    if (ret != 0) {
-                        lk.unlock();
-                        return onDeviceError("%s: format coversion failed!", __FUNCTION__);
-                    }
-                    int relFence = sHandleImporter.unlock(*(halBuf.bufPtr));
-                    if (relFence >= 0) {
-                        halBuf.acquireFence = relFence;
-                    }
-                }else if (req->frameIn->mFourcc == V4L2_PIX_FMT_H264){
-                    if (req->mShareFd <= 0) {
-                        lk.unlock();
-                        Status st = parent->processCaptureRequestError(req);
-                        if (st != Status::OK) {
-                            return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
-                        }
-                        signalRequestDone();
-                        return true;
-                    }
-                    int handle_fd = -1, ret;
-
-                    const native_handle_t* tmp_hand = (const native_handle_t*)(*(halBuf.bufPtr));
-
-
-                    RockchipRga& rkRga(RockchipRga::get());
-                    ret = rkRga.RkRgaGetBufferFd(tmp_hand, &handle_fd);
-                    if (ret){
-                        ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(tmp_hand));
-                        return true;
-                    }
-                    ALOGV("%s(%d): halBuf handle_fd(%d)", __FUNCTION__, __LINE__, handle_fd);
-                    ALOGV("%s(%d) halbuf_wxh(%dx%d) frameNumber(%d)", __FUNCTION__, __LINE__,
-                        halBuf.width, halBuf.height, req->frameNumber);
-                    camera2::RgaCropScale::rga_scale_crop(
-                        tempFrameWidth, tempFrameHeight, req->mShareFd,
-                        HAL_PIXEL_FORMAT_YCrCb_NV12, handle_fd,
-                        halBuf.width, halBuf.height, 100, false, true,
-                        (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
-                        false);
-                } else{
-                    if (req->mShareFd <= 0) {
-                        lk.unlock();
-                        Status st = parent->processCaptureRequestError(req);
-                        if (st != Status::OK) {
-                            return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
-                        }
-                        signalRequestDone();
-                        return true;
-                    }
-                    const native_handle_t* tmp_hand = (const native_handle_t*)(*(halBuf.bufPtr));
-                    int handle_fd;
-                    RockchipRga& rkRga(RockchipRga::get());
-                    int ret = rkRga.RkRgaGetBufferFd(tmp_hand, &handle_fd);
-                    if (ret){
-                        ALOGE("%s: get buffer fd fail: %s, buffer_handle_t=%p",__FUNCTION__, strerror(errno), (void*)(tmp_hand));
-                        return true;
-                    }
-                    camera2::RgaCropScale::rga_scale_crop(
-                        tempFrameWidth, tempFrameHeight, req->mShareFd,
-                        HAL_PIXEL_FORMAT_YCrCb_NV12, handle_fd,
-                        halBuf.width, halBuf.height, 100, false, true,
-                        (halBuf.format == PixelFormat::YCRCB_420_SP), is16Align,
-                        false);
+                }else if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV16){
+                    rgain.fmt = RK_FORMAT_YCbCr_422_SP;
+                    rgain.handle = req->frameIn->mExportHandle;
+                }else if (req->frameIn->mFourcc == V4L2_PIX_FMT_BGR24){
+                    rgain.fmt = 0x7 << 8;
+                    rgain.handle = req->frameIn->mExportHandle;
+                } else{ //NV24
+                    rgain.fmt = HAL_PIXEL_FORMAT_YCrCb_NV12;
+                    rgain.fd = req->mShareFd;
+                }
+                if (camera2::RgaCropScale::CropScaleNV12Or21Async(&rgain, &rgaout) != IM_STATUS_SUCCESS) {
+                    LOGE("%s:  crop&scale by RGA failed...", __FUNCTION__);
                 }
             }break;
-#endif
+
             case PixelFormat::YV12: {
                 IMapper::Rect outRect{0, 0, static_cast<int32_t>(halBuf.width),
                                       static_cast<int32_t>(halBuf.height)};
@@ -4027,6 +4035,10 @@ bool HdmiDeviceSession::OutputThread::threadLoop() {
             default:
                 lk.unlock();
                 return onDeviceError("%s: unknown output format %x", __FUNCTION__, halBuf.format);
+        }
+        if (rgaout.release_fence_fd != -1)
+        {
+            halBuf.acquireFence = rgaout.release_fence_fd;
         }
     }  // for each buffer
     mScaledYu12Frames.clear();

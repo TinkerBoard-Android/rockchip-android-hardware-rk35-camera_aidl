@@ -21,8 +21,29 @@ namespace camera2 {
 class RgaCropScale {
  public:
     struct Params {
+      public:
+        Params() {
+            fd = -1;
+            handle = -1;
+            vir_addr = 0;
+            offset_x = 0;
+            offset_y = 0;
+            width_stride = 0;
+            height_stride = 0;
+            width = 0;
+            height = 0;
+            blend = 0;
+            translate_x = 0;
+            translate_y = 0;
+            rotation = 0;
+            fmt = 0;
+            mirror = false;
+            acquire_fence_fd = -1;
+            release_fence_fd = -1;
+        }
         /* use share fd if it's valid */
         int fd;
+        int handle;
         /* if fd == -1, use virtual address */
         char *vir_addr;
         int offset_x;
@@ -39,6 +60,8 @@ class RgaCropScale {
         int fmt;
         /* just for src params */
         bool mirror;
+        int acquire_fence_fd;
+        int release_fence_fd;
     };
 
     static int CropScaleNV12Or21(struct Params* in, struct Params* out);
@@ -56,7 +79,8 @@ class RgaCropScale {
 		bool isDstNV21, bool is16Align, bool isYuyvFormat);
 
 static int Im2dBlit(struct Params* in,  struct Params* out);
-
+static int CropScaleNV12Or21Async(struct Params* in, struct Params* out);
+static int WaitFenceDone(int fence_fd);
 };
 
 } /* namespace camera2 */
