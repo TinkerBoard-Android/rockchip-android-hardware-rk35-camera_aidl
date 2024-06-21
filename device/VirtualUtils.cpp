@@ -721,6 +721,7 @@ int encodeJpegYU12(const Size& inSz, const YCbCrLayout& inLayout, int jpegQualit
 
     /* This will flush everything */
     jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
 
     /* Grab the actual code size and set it */
     actualCodeSize = dmgr.mEncodedSize;
