@@ -314,7 +314,7 @@ const int ExternalCameraDeviceSession::kMaxStallStream;
 HandleImporter ExternalCameraDeviceSession::sHandleImporter;
 
 sp<GraphicBuffer> GraphicBuffer_Init(int width, int height,int format) {
-    sp<GraphicBuffer> gb(new GraphicBuffer(width,height,format,
+    sp<GraphicBuffer> gb(new GraphicBuffer(width,height,format,0,
                                            GRALLOC_USAGE_SW_WRITE_OFTEN |
                                            RK_GRALLOC_USAGE_RGA_ACCESS |
                                            RK_GRALLOC_USAGE_SPECIFY_STRIDE |
