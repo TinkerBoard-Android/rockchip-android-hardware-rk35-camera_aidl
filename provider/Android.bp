@@ -48,6 +48,9 @@ cc_library_shared {
         "hardware/rockchip/libiep/include",
     ],
     export_include_dirs: ["."],
+    cflags: [
+        "-Wno-error",
+    ],
 }
 
 cc_defaults {
@@ -80,6 +83,9 @@ cc_defaults {
     ],
     static_libs: [
         "android.hardware.camera.common@1.0-helper",
+    ],
+    cflags: [
+        "-Wno-error",
     ],
 }
 

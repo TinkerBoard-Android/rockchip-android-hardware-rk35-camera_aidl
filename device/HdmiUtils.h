@@ -141,7 +141,8 @@ struct Frame : public std::enable_shared_from_this<Frame> {
     const int32_t mWidth;
     const int32_t mHeight;
     const uint32_t mFourcc;
-
+    int mExportHandle = -1;
+    int mExportFd = -1;
     // getData might involve map/allocation
     virtual int getData(uint8_t** outData, size_t* dataSize) = 0;
 };
@@ -151,7 +152,7 @@ struct Frame : public std::enable_shared_from_this<Frame> {
 class V4L2Frame : public Frame {
   public:
     V4L2Frame(uint32_t w, uint32_t h, uint32_t fourcc, int bufIdx, int fd, uint32_t dataSize,
-              uint64_t offset);
+              uint64_t offset,int exportFd,int exportHandle);
     virtual ~V4L2Frame();
 
     virtual int getData(uint8_t** outData, size_t* dataSize) override;
@@ -208,6 +209,7 @@ struct HalStreamBuffer {
     buffer_handle_t* bufPtr;
     int acquireFence;
     bool fenceTimeout;
+    int rgaHandle;
 };
 
 struct HalRequest {
@@ -225,9 +227,11 @@ struct HalRequest {
     int index;
     unsigned long mShareFd;
     unsigned long mVirAddr;
+    int mHandle;
     uint8_t* inData;
     size_t inDataSize;
     std::string cameraId;
+    struct timespec reqTime;
 #endif
 };
 

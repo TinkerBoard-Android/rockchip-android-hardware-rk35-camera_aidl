@@ -25,6 +25,7 @@
 #include <aidl/android/hardware/camera/device/Stream.h>
 #include <hardware/camera3.h>
 #include <system/camera_metadata.h>
+#include "log.h"
 
 namespace android {
 namespace hardware {
@@ -51,6 +52,7 @@ inline ndk::ScopedAStatus fromStatus(Status status) {
                    ? ndk::ScopedAStatus::ok()
                    : ndk::ScopedAStatus::fromServiceSpecificError(static_cast<int32_t>(status));
 }
+
 
 }  // namespace implementation
 }  // namespace device

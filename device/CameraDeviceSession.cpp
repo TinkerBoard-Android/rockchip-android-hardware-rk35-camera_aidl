@@ -806,7 +806,7 @@ int CameraDeviceSession::waitFlushingDone(const std::chrono::steady_clock::time_
 
     using namespace std::chrono_literals;
     constexpr int kRecommendedDeadlineMs = 100;
-    constexpr int kFatalDeadlineMs = 1000;
+    constexpr int kFatalDeadlineMs = 3000;
     const auto fatalDeadline = start + (1ms * kFatalDeadlineMs);
 
     const auto checkIfNoBuffersInFlight = [this](){ return mNumBuffersInFlight == 0; };

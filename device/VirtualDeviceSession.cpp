@@ -103,10 +103,7 @@ constexpr int IOCTL_RETRY_SLEEP_US = 33000;  // 33ms * MAX_RETRY = 0.5 seconds
 static constexpr int kDumpLockRetries = 50;
 static constexpr int kDumpLockSleep = 60000;
 
-std::map<int, int> mapFrameCount;
-std::map<int, int> mapLastFrameCount;
-std::map<int, nsecs_t>  mapLastFpsTime;
-std::map<int, float>  mapFps;
+
 
 
 bool tryLock(Mutex& mutex) {
@@ -133,18 +130,7 @@ bool tryLock(std::mutex& mutex) {
     return locked;
 }
 
-extern "C" void debugShowFPS(std::string cameraId) {
-    int mapId = std::stoi(cameraId.c_str());
-    mapFrameCount[mapId]++;
-    if (!(mapFrameCount[mapId] & 0x1F)) {
-        nsecs_t now = systemTime();
-        nsecs_t diff = now - mapLastFpsTime[mapId];
-        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
-        mapLastFpsTime[mapId] = now;
-        mapLastFrameCount[mapId] = mapFrameCount[mapId];
-        ALOGD("CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
-    }
-}
+
 
 }  // anonymous namespace
 
@@ -197,6 +183,7 @@ VirtualDeviceSession::VirtualDeviceSession(
       mMaxThumbResolution(getMaxThumbResolution()),
       mMaxJpegResolution(getMaxJpegResolution()) {
         mSupportBufMgr = false;
+        Number = 0;
     }
 
 void VirtualDeviceSession::createPreviewBuffer(){
@@ -258,9 +245,10 @@ bool VirtualDeviceSession::initialize() {
         ALOGE("%s: invalid result fmq", __FUNCTION__);
         return true;
     }
-
-    mOutputThread->run();
+    mFrameWorkerThread->run();
     mFormatConvertThread->run();
+    mOutputThread->run();
+
     return false;
 }
 
@@ -283,6 +271,8 @@ void VirtualDeviceSession::initOutputThread() {
     mOutputThread = std::make_shared<OutputThread>(/*parent=*/thiz, mCroppingType,
                                                    mCameraCharacteristics, mBufferRequestThread);
     mFormatConvertThread = std::make_shared<FormatConvertThread>(thiz,mOutputThread);
+
+    mFrameWorkerThread = std::make_shared<FrameWorkerThread>(thiz,mFormatConvertThread,mCameraId);
 }
 
 void VirtualDeviceSession::closeOutputThread() {
@@ -305,6 +295,10 @@ void VirtualDeviceSession::closeOutputThreadImpl() {
         mFormatConvertThread->requestExitAndWait();
         mFormatConvertThread.reset();
     }
+    if(mFrameWorkerThread != nullptr){
+        mFrameWorkerThread->requestExitAndWait();
+        mFrameWorkerThread.reset();
+    }
 }
 
 Status VirtualDeviceSession::initStatus() const {
@@ -322,6 +316,7 @@ VirtualDeviceSession::~VirtualDeviceSession() {
         ALOGE("VirtualDeviceSession deleted before close!");
         close(/*callerIsDtor*/ true);
     }
+    Number = 0;
 }
 
 ScopedAStatus VirtualDeviceSession::constructDefaultRequestSettings(
@@ -355,6 +350,7 @@ ScopedAStatus VirtualDeviceSession::constructDefaultRequestSettings(
 ScopedAStatus VirtualDeviceSession::configureStreams(
         const StreamConfiguration& in_requestedConfiguration,
         std::vector<HalStream>* _aidl_return) {
+    HAL_TRACE_CALL();
     uint32_t blobBufferSize = 0;
     _aidl_return->clear();
     Mutex::Autolock _il(mInterfaceLock);
@@ -614,6 +610,7 @@ ScopedAStatus VirtualDeviceSession::processCaptureRequest(
 }
 
 Status VirtualDeviceSession::processOneCaptureRequest(const CaptureRequest& request) {
+    HAL_TRACE_CALL();
     ATRACE_CALL();
     Status status = initStatus();
     if (status != Status::OK) {
@@ -767,9 +764,9 @@ Status VirtualDeviceSession::processOneCaptureRequest(const CaptureRequest& requ
         std::lock_guard<std::mutex> lk(mInflightFramesLock);
         mInflightFrames.insert(halReq->frameNumber);
     }
-    // Send request to OutputThread for the rest of processing
-    //mOutputThread->submitRequest(halReq);
-    mFormatConvertThread->submitRequest(halReq);;
+    debugShowFPS(halReq->cameraId);
+    // Send request to FrameWorkerThread for the rest of processing
+    mFrameWorkerThread->submitRequest(halReq);;
     mFirstRequest = false;
     return Status::OK;
 }
@@ -1149,6 +1146,7 @@ status_t VirtualDeviceSession::fillCaptureResult(common::V1_0::helper::CameraMet
 
 int VirtualDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& v4l2Fmt,
                                                            double requestFps) {
+    HAL_TRACE_CALL();
     ATRACE_CALL();
     int ret = v4l2StreamOffLocked();
     if (ret != OK) {
@@ -1240,6 +1238,7 @@ int VirtualDeviceSession::configureV4l2StreamLocked(SupportedV4L2Format& v4l2Fmt
 }
 
 std::unique_ptr<V4L2Frame> VirtualDeviceSession::dequeueV4l2FrameLocked(nsecs_t* shutterTs) {
+    HAL_TRACE_CALL();
     ATRACE_CALL();
 
     std::unique_ptr<V4L2Frame> ret = nullptr;
@@ -1262,10 +1261,10 @@ std::unique_ptr<V4L2Frame> VirtualDeviceSession::dequeueV4l2FrameLocked(nsecs_t*
 
     ATRACE_BEGIN("VIDIOC_DQBUF");
     v4l2_buffer buffer{};
-    usleep(1000 * 33);
+
 
     ATRACE_END();
-    static long Number = 0;
+
     buffer.index= Number% 4;
     Number++;
     *shutterTs = systemTime(SYSTEM_TIME_MONOTONIC);
@@ -1274,7 +1273,7 @@ std::unique_ptr<V4L2Frame> VirtualDeviceSession::dequeueV4l2FrameLocked(nsecs_t*
         std::lock_guard<std::mutex> lk(mV4l2BufferLock);
         mNumDequeuedV4l2Buffers++;
     }
-    //ALOGD("@%s(%d) done. buffer.index:%d",__FUNCTION__,__LINE__,buffer.index);
+    //ALOGD("@%s(%d) done. cameraId:%s buffer.index:%d Number:%d",__FUNCTION__,__LINE__,mCameraId.c_str(),buffer.index,Number);
     return std::make_unique<V4L2Frame>(mV4l2StreamingFmt.width, mV4l2StreamingFmt.height,
                                        mV4l2StreamingFmt.fourcc, buffer.index, mV4l2Fd.get(),
                                        (mCapability.device_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) > 0 ? buffer.m.planes[0].length : buffer.bytesused,
@@ -2001,6 +2000,7 @@ int VirtualDeviceSession::BufferRequestThread::waitForBufferRequestDone(
 }
 
 void VirtualDeviceSession::BufferRequestThread::waitForNextRequest() {
+    HAL_TRACE_NAME("BufferRequestThread::waitForNextRequest");
     ATRACE_CALL();
     std::unique_lock<std::mutex> lk(mLock);
     int waitTimes = 0;
@@ -2030,6 +2030,7 @@ void VirtualDeviceSession::BufferRequestThread::waitForNextRequest() {
 }
 
 bool VirtualDeviceSession::BufferRequestThread::threadLoop() {
+    HAL_TRACE_NAME("BufferRequestThread::threadLoop");
     waitForNextRequest();
     if (exitPending()) {
         return false;
@@ -2115,7 +2116,86 @@ bool VirtualDeviceSession::BufferRequestThread::threadLoop() {
 }
 
 // End VirtualDeviceSession::BufferRequestThread functions
+// Start VirtualDeviceSession::FrameWorkerThread functions
+VirtualDeviceSession::FrameWorkerThread::FrameWorkerThread(std::weak_ptr<VirtualDeviceSession> parent,
+        std::shared_ptr<FormatConvertThread> thread,std::string cameraId):mParent(parent),mFormatConvertThread(thread) ,mCameraId(cameraId) {
 
+}
+VirtualDeviceSession::FrameWorkerThread::~FrameWorkerThread() {
+}
+Status VirtualDeviceSession::FrameWorkerThread::submitRequest(
+        const std::shared_ptr<HalRequest>& req) {
+    std::unique_lock<std::mutex> lk(mRequestListLock);
+    mRequestList.push_back(req);
+    lk.unlock();
+    mRequestCond.notify_one();
+    return Status::OK;
+}
+void VirtualDeviceSession::FrameWorkerThread::waitForNextRequest(std::shared_ptr<HalRequest>* out) {
+    HAL_TRACE_FUNC_PRETTY(mCameraId);
+    ATRACE_CALL();
+    if (out == nullptr) {
+        ALOGE("%s: out is null", __FUNCTION__);
+        return;
+    }
+    std::unique_lock<std::mutex> lk(mRequestListLock);
+    int waitTimes = 0;
+    while (mRequestList.empty()) {
+        if (exitPending()) {
+            return;
+        }
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(kReqWaitTimeoutMs);
+        auto st = mRequestCond.wait_for(lk, timeout);
+        if (st == std::cv_status::timeout) {
+            waitTimes++;
+            if (waitTimes == kReqWaitTimesMax) {
+                // no new request, return
+                return;
+            }
+        }
+    }
+    *out = mRequestList.front();
+    mRequestList.pop_front();
+}
+ void VirtualDeviceSession::FrameWorkerThread::debugShowFPS(std::string cameraId) {
+    int mapId = std::stoi(cameraId.c_str());
+    mapFrameCount[mapId]++;
+    if (!(mapFrameCount[mapId] & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mapLastFpsTime[mapId];
+        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
+        mapLastFpsTime[mapId] = now;
+        mapLastFrameCount[mapId] = mapFrameCount[mapId];
+        ALOGD("FrameWorkerThread CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
+    }
+}
+
+bool VirtualDeviceSession::FrameWorkerThread::threadLoop() {
+    HAL_TRACE_FUNC_PRETTY(mCameraId);
+    auto parent = mParent.lock();
+    if (parent == nullptr) {
+        ALOGE("%s: session has been disconnected!", __FUNCTION__);
+        return false;
+    }
+
+    std::shared_ptr<HalRequest> req;
+
+    waitForNextRequest(&req);
+    if (req == nullptr) {
+        // No new request, wait again
+        return true;
+    }
+    int mapId = std::stoi(req->cameraId.c_str());
+
+    usleep(1000 * 33);
+
+    req->shutterTs = systemTime(SYSTEM_TIME_MONOTONIC);
+
+    mFormatConvertThread->submitRequest(req);
+    LOG_FRAME(req->cameraId, req->frameNumber,&req->reqTime);
+    return true;
+}
+// End VirtualDeviceSession::FrameWorkerThread functions
 // Start VirtualDeviceSession::FormatConvertThread functions
 
 VirtualDeviceSession::FormatConvertThread::FormatConvertThread(
@@ -2137,6 +2217,7 @@ Status VirtualDeviceSession::FormatConvertThread::submitRequest(
     return Status::OK;
 }
 void VirtualDeviceSession::FormatConvertThread::waitForNextRequest(std::shared_ptr<HalRequest>* out) {
+    HAL_TRACE_CALL();
     ATRACE_CALL();
     if (out == nullptr) {
         ALOGE("%s: out is null", __FUNCTION__);
@@ -2145,9 +2226,11 @@ void VirtualDeviceSession::FormatConvertThread::waitForNextRequest(std::shared_p
     std::unique_lock<std::mutex> lk(mRequestListLock);
     int waitTimes = 0;
     while (mRequestList.empty()) {
+        HAL_TRACE_CALL();
         if (exitPending()) {
             return;
         }
+
         std::chrono::milliseconds timeout = std::chrono::milliseconds(kReqWaitTimeoutMs);
         auto st = mRequestCond.wait_for(lk, timeout);
         if (st == std::cv_status::timeout) {
@@ -2292,8 +2375,45 @@ int rga_scale_crop(
     return ret;
 }
 
+ void VirtualDeviceSession::debugShowFPS(std::string cameraId) {
+    int mapId = std::stoi(cameraId.c_str());
+    mapFrameCount[mapId]++;
+    if (!(mapFrameCount[mapId] & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mapLastFpsTime[mapId];
+        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
+        mapLastFpsTime[mapId] = now;
+        mapLastFrameCount[mapId] = mapFrameCount[mapId];
+        ALOGD("VirtualDeviceSession CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
+    }
+}
 
+ void VirtualDeviceSession::OutputThread::debugShowFPS(std::string cameraId) {
+    int mapId = std::stoi(cameraId.c_str());
+    mapFrameCount[mapId]++;
+    if (!(mapFrameCount[mapId] & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mapLastFpsTime[mapId];
+        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
+        mapLastFpsTime[mapId] = now;
+        mapLastFrameCount[mapId] = mapFrameCount[mapId];
+        ALOGD("OutputThread CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
+    }
+}
+ void VirtualDeviceSession::FormatConvertThread::debugShowFPS(std::string cameraId) {
+    int mapId = std::stoi(cameraId.c_str());
+    mapFrameCount[mapId]++;
+    if (!(mapFrameCount[mapId] & 0x1F)) {
+        nsecs_t now = systemTime();
+        nsecs_t diff = now - mapLastFpsTime[mapId];
+        mapFps[mapId] = ((mapFrameCount[mapId] - mapLastFrameCount[mapId]) * float(s2ns(1))) / diff;
+        mapLastFpsTime[mapId] = now;
+        mapLastFrameCount[mapId] = mapFrameCount[mapId];
+        ALOGD("FormatConvertThread CameraID:%s, %d Frames, %2.3f FPS",cameraId.c_str(), mapFrameCount[mapId], mapFps[mapId]);
+    }
+}
 bool VirtualDeviceSession::FormatConvertThread::threadLoop() {
+    HAL_TRACE_CALL();
     std::shared_ptr<HalRequest> req;
     auto parent = mParent.lock();
     if (parent == nullptr) {
@@ -2302,6 +2422,7 @@ bool VirtualDeviceSession::FormatConvertThread::threadLoop() {
     }
 
     waitForNextRequest(&req);
+
     if (req == nullptr) {
         // No new request, wait again
         return true;
@@ -2340,6 +2461,7 @@ bool VirtualDeviceSession::FormatConvertThread::threadLoop() {
     req->mShareFd = src_fd;
 
     if (req->frameIn->mFourcc == V4L2_PIX_FMT_NV12) {
+        #if 1
         sp<rockchip::hardware::hdmi::V1_0::IHdmi> client = rockchip::hardware::hdmi::V1_0::IHdmi::getService();
         if(client.get()!= nullptr){
             rockchip::hardware::hdmi::V1_0::FrameInfo frameInfo;
@@ -2356,6 +2478,7 @@ bool VirtualDeviceSession::FormatConvertThread::threadLoop() {
             });
             //ALOGV("@%s receive frame(%d,%d)",__FUNCTION__,(int)frameInfo.width,(int)frameInfo.height);
         }
+        #endif
     }
 
     mFmtOutputThread->submitRequest(req);
@@ -2564,6 +2687,7 @@ int VirtualDeviceSession::OutputThread::waitForBufferRequestDone(
 
 void VirtualDeviceSession::OutputThread::waitForNextRequest(
         std::shared_ptr<HalRequest>* out) {
+    HAL_TRACE_CALL();
     ATRACE_CALL();
     if (out == nullptr) {
         ALOGE("%s: out is null", __FUNCTION__);
@@ -2971,6 +3095,7 @@ void VirtualDeviceSession::OutputThread::clearIntermediateBuffers() {
 }
 
 bool VirtualDeviceSession::OutputThread::threadLoop() {
+    HAL_TRACE_NAME("OutputThread::threadLoop");
     std::shared_ptr<HalRequest> req;
     auto parent = mParent.lock();
     if (parent == nullptr) {
@@ -2986,6 +3111,8 @@ bool VirtualDeviceSession::OutputThread::threadLoop() {
         // No new request, wait again
         return true;
     }
+    //usleep(1000 * 32);
+    debugShowFPS(req->cameraId);
     // ALOGD("%s frameId:%d,index:%d",__PRETTY_FUNCTION__,req->frameNumber,std::static_pointer_cast<V4L2Frame>(req->frameIn)->mBufferIndex);
     auto onDeviceError = [&](auto... args) {
         ALOGE(args...);

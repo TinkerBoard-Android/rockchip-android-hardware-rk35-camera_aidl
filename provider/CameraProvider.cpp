@@ -23,6 +23,7 @@
 #include "HwCamera.h"
 #include "debug.h"
 #include "VendorTagDescriptor.h"
+#include <cutils/properties.h>
 
 namespace android {
 namespace hardware {
@@ -32,6 +33,18 @@ namespace implementation {
 namespace {
 ndk::ScopedAStatus toScopedAStatus(const aidl::android::hardware::camera::common::Status s) {
     return ndk::ScopedAStatus::fromServiceSpecificError(static_cast<int32_t>(s));
+}
+std::string getHdmiID(){
+    std::string  hdmiid;
+    char value[PROPERTY_VALUE_MAX]={0};
+    property_get("persist.vendor.camera.hdmiid", value, "");
+    ALOGD("%s:persist.vendor.camera.hdmiid %s",__FUNCTION__,value);
+    hdmiid = value;
+    return hdmiid;
+}
+void updateHdmiID(const char* value){
+     ALOGD("%s:persist.vendor.camera.mipi %s",__FUNCTION__,value);
+     property_set("persist.vendor.camera.mipi", value);
 }
 }
 using aidl::android::hardware::camera::common::Status;
@@ -123,9 +136,18 @@ ScopedAStatus CameraProvider::getCameraDeviceInterface(
     if ((index >= 0) && (index < mAvailableCameras.size())) {
         auto hwCamera = mAvailableCameras[index]();
         if (hwCamera) {
+            auto cameraId = hwCamera->getCameraId().c_str();
             auto p = ndk::SharedRefBase::make<CameraDevice>(std::move(hwCamera),hwCamera->getCameraId());
             p->mSelf = p;
             *device = std::move(p);
+            std::string hdmiid = getHdmiID();
+            if (hdmiid!="")
+            {
+                if (strstr(hdmiid.c_str(),cameraId))
+                {
+                    updateHdmiID(std::to_string(maybeIndex.value()).c_str());
+                }
+            }
             return ScopedAStatus::ok();
         } else {
             return toScopedAStatus(FAILURE(Status::INTERNAL_ERROR));
